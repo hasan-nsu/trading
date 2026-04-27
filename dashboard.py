@@ -541,6 +541,160 @@ def detect_macro_in_headlines(headlines: list[str]) -> list[str]:
     return sorted(found)
 
 
+def sentiment_bar_html(score: float) -> str:
+    """Visual sentiment score bar from -1 to +1."""
+    # Clamp
+    score = max(-1.0, min(1.0, score))
+    # Position of marker in % (0% = far left = -1, 100% = far right = +1)
+    pos_pct = (score + 1) / 2 * 100
+
+    # Color based on score
+    if score > 0.3:
+        color = "#10b981"
+        label = "BULLISH"
+    elif score < -0.3:
+        color = "#ef4444"
+        label = "BEARISH"
+    else:
+        color = "#f59e0b"
+        label = "NEUTRAL"
+
+    return f"""
+    <div class='sentiment-bar-wrap'>
+      <div class='sentiment-bar-track'>
+        <div class='sentiment-bar-zero'></div>
+        <div class='sentiment-bar-marker' style='left: {pos_pct}%; background: {color};'></div>
+      </div>
+      <div class='sentiment-bar-labels'>
+        <span style='color:#ef4444'>−1</span>
+        <span style='color:{color}; font-weight:700'>{score:+.2f} · {label}</span>
+        <span style='color:#10b981'>+1</span>
+      </div>
+    </div>
+    """
+
+
+def dip_buy_score(ticker: str, price: dict, ai: dict, card: dict) -> dict:
+    """
+    Score a stock as a dip-buy candidate based on Shakil's strategy:
+    - Buying small dips on big stable companies
+    - 5-7% recent drop = good dip
+    - RSI 25-40 = oversold sweet spot
+    - Not at 52-week lows (no falling knives)
+    - News sentiment NEGATIVE/MIXED but not catastrophic
+    - No earnings within 14 days (gap risk)
+
+    Returns: {score: 0-100, status: str, color: str, reasons: list[str]}
+    """
+    if price.get("error"):
+        return {"score": 0, "status": "—", "color": "#94a3b8", "reasons": ["No price data"]}
+
+    score = 0
+    reasons_pos = []
+    reasons_neg = []
+
+    rsi = price.get("rsi", 50)
+    week_pct = price.get("week_pct", 0)
+    day_pct = price.get("day_pct", 0)
+    pct_from_hi = price.get("pct_from_hi", 0)
+    above_ma50 = price.get("above_ma50", False)
+    sentiment = ai.get("sentiment", "NEUTRAL")
+    earnings = card.get("earnings")
+
+    # ━━ POSITIVE SIGNALS ━━
+
+    # RSI in dip-buy zone (25-40 = best, 40-50 = ok)
+    if 25 <= rsi <= 40:
+        score += 30
+        reasons_pos.append(f"RSI {rsi:.0f} = oversold (sweet spot 25-40)")
+    elif 40 < rsi <= 50:
+        score += 15
+        reasons_pos.append(f"RSI {rsi:.0f} = mildly oversold")
+    elif rsi < 25:
+        score += 5
+        reasons_neg.append(f"RSI {rsi:.0f} < 25 = panic, falling knife risk")
+    elif rsi > 60:
+        reasons_neg.append(f"RSI {rsi:.0f} > 60 = not a dip yet")
+
+    # Week change (-3% to -8% = ideal dip, beyond -10% = warning)
+    if -8 <= week_pct <= -3:
+        score += 25
+        reasons_pos.append(f"Week {week_pct:+.1f}% = real dip (target zone)")
+    elif -3 < week_pct < 0:
+        score += 10
+        reasons_pos.append(f"Week {week_pct:+.1f}% = mild pullback")
+    elif week_pct < -10:
+        score += 5
+        reasons_neg.append(f"Week {week_pct:+.1f}% = severe drop, may keep falling")
+    elif week_pct >= 2:
+        reasons_neg.append(f"Week {week_pct:+.1f}% = already up, no dip")
+
+    # Distance from 52-week high (good dips happen 10-25% below)
+    if -25 <= pct_from_hi <= -10:
+        score += 20
+        reasons_pos.append(f"{pct_from_hi:+.0f}% from 52w high = healthy pullback zone")
+    elif pct_from_hi > -10:
+        score += 5
+        reasons_pos.append(f"{pct_from_hi:+.0f}% from 52w high = still strong")
+    elif pct_from_hi < -40:
+        reasons_neg.append(f"{pct_from_hi:+.0f}% from high = deep damage, risk zone")
+
+    # Above 50-day MA = healthy uptrend (good)
+    if above_ma50:
+        score += 10
+        reasons_pos.append("Above 50d MA = uptrend intact")
+    else:
+        reasons_neg.append("Below 50d MA = trend broken")
+
+    # News sentiment - for dip-buying, MIXED/slightly NEGATIVE is actually best
+    # (POSITIVE = priced in, very NEGATIVE = real problem)
+    if sentiment == "MIXED":
+        score += 10
+        reasons_pos.append("News mixed = noise, often buyable")
+    elif sentiment == "NEUTRAL":
+        score += 8
+        reasons_pos.append("News quiet = no catalyst against you")
+    elif sentiment == "NEGATIVE" and ai.get("score", 0) > -0.6:
+        score += 5
+        reasons_pos.append("News mildly negative = sentiment dip")
+    elif sentiment == "NEGATIVE" and ai.get("score", 0) <= -0.6:
+        reasons_neg.append("News heavily negative = real problem, not just dip")
+    elif sentiment == "POSITIVE":
+        reasons_neg.append("News positive = no dip, momentum already up")
+
+    # ━━ HARD KILLS (subtract big) ━━
+    if earnings:
+        score -= 60  # earnings within 14d = always AVOID, gap risk too high
+        reasons_neg.append(f"🚫 Earnings in {earnings} = DON'T BUY (gap risk)")
+    if pct_from_hi < -50:
+        score -= 40  # Deep damage = strong AVOID
+        reasons_neg.append("Down 50%+ from high = falling knife / structural problem")
+    if rsi < 20:
+        score -= 20  # Extreme panic adds to falling knife signal
+        reasons_neg.append("RSI < 20 = extreme panic, wait for reversal")
+
+    # Clamp 0-100
+    score = max(0, min(100, score))
+
+    # Status label
+    if score >= 65:
+        status, color = "🟢 STRONG DIP", "#10b981"
+    elif score >= 45:
+        status, color = "🟡 MILD DIP", "#f59e0b"
+    elif score >= 25:
+        status, color = "⚪ NOT DIPPING", "#94a3b8"
+    else:
+        status, color = "🔴 AVOID", "#ef4444"
+
+    return {
+        "score": int(score),
+        "status": status,
+        "color": color,
+        "reasons_pos": reasons_pos,
+        "reasons_neg": reasons_neg,
+    }
+
+
 # ============================================================================
 # UI: STYLING
 # ============================================================================
@@ -576,25 +730,75 @@ h1 { font-family: 'Georgia', serif; }
     margin: 4px 0; font-size: 0.9em; color: #166534;
 }
 .macro-affected.bad { background: #fef2f2; color: #991b1b; }
-.news-briefing {
-    background: #f8fafc;
-    border-left: 3px solid #0891b2;
-    border-radius: 6px;
-    padding: 10px 14px;
-    margin: 8px 0 6px 0;
-}
-.briefing-label {
-    font-size: 0.75em;
-    font-weight: 700;
-    color: #0891b2;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
+
+/* Sentiment bar */
+.sentiment-bar-wrap { padding: 4px 0; }
+.sentiment-bar-track {
+    position: relative;
+    height: 8px;
+    background: linear-gradient(90deg, #fee2e2 0%, #fef3c7 50%, #dcfce7 100%);
+    border-radius: 4px;
     margin-bottom: 4px;
 }
-.briefing-body {
-    font-size: 0.92em;
+.sentiment-bar-zero {
+    position: absolute;
+    left: 50%;
+    top: -2px;
+    height: 12px;
+    width: 1px;
+    background: #94a3b8;
+}
+.sentiment-bar-marker {
+    position: absolute;
+    top: -3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    transform: translateX(-50%);
+    border: 2px solid white;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.sentiment-bar-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75em;
+}
+
+/* Dip-buy badge */
+.dip-buy-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    margin: 6px 0;
+    border-radius: 8px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+}
+.dip-buy-score {
+    font-size: 1.4em;
+    font-weight: 800;
+    line-height: 1;
+}
+.dip-buy-status {
+    font-size: 0.85em;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+}
+.dip-buy-tag {
+    font-size: 0.7em;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+
+/* Briefing - now small dropdown style */
+.news-briefing-mini {
+    font-size: 0.88em;
     line-height: 1.55;
-    color: #334155;
+    color: #475569;
+    padding: 8px 4px 4px 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -721,6 +925,46 @@ with st.spinner("Analyzing watchlist (this takes ~45s on first load — AI is re
     progress.empty()
 
 
+# Pre-compute dip-buy scores for all stocks (needed for Top Picks + Calm Mode)
+dip_scores = {}
+for t in ordered_tickers:
+    c = cards[t]
+    if not c["price"].get("error"):
+        dip_scores[t] = dip_buy_score(t, c["price"], c["ai"], c)
+
+
+# ━━━━━ TOP DIP-BUY CANDIDATES BANNER ━━━━━
+top_dips = sorted(
+    [(t, d) for t, d in dip_scores.items() if d["score"] >= 45],
+    key=lambda x: -x[1]["score"]
+)[:5]
+
+if top_dips:
+    st.markdown("#### 🎯 Top Dip-Buy Candidates Right Now")
+    cols = st.columns(min(len(top_dips), 5))
+    for col, (ticker, dip) in zip(cols, top_dips):
+        meta = WATCHLIST[ticker]
+        price = cards[ticker]["price"]
+        d_color = dip["color"]
+        d_score = dip["score"]
+        d_status = dip["status"]
+        d_price = price.get("price", 0)
+        col.markdown(
+            f"<div style='background:white; border-left:4px solid {d_color}; "
+            f"border-radius:8px; padding:10px 12px; box-shadow:0 1px 2px rgba(0,0,0,0.05);'>"
+            f"<div style='font-size:0.7em; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;'>"
+            f"{meta['sector']}</div>"
+            f"<div style='font-size:1.3em; font-weight:700; color:#0f172a;'>{ticker}</div>"
+            f"<div style='font-size:0.85em; color:#64748b;'>${d_price:.2f} · "
+            f"<span style='color:{d_color}; font-weight:700'>{d_score}/100</span></div>"
+            f"<div style='font-size:0.75em; color:{d_color}; margin-top:4px; font-weight:600'>{d_status}</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    st.caption("⚠️ A high score is NOT a buy signal. Run the 5-question pre-trade checklist (in your PDF playbook) before any trade.")
+    st.markdown("---")
+
+
 def show_in_calm(card: dict, ticker: str) -> bool:
     if ticker in open_pos_set:
         return True
@@ -731,6 +975,9 @@ def show_in_calm(card: dict, ticker: str) -> bool:
     if card["news_count"] >= 8:
         return True
     if ticker in (macro_result.get("winners") or []) or ticker in (macro_result.get("losers") or []):
+        return True
+    # Show stocks with strong dip-buy setup
+    if dip_scores.get(ticker, {}).get("score", 0) >= 60:
         return True
     return False
 
@@ -794,7 +1041,8 @@ for ticker in visible_tickers:
 
         with c4:
             st.markdown(f"{sentiment_icon(ai['sentiment'])} **{ai['sentiment']}**")
-            st.caption(f"Score: {ai['score']:+.2f}")
+            # Sentiment bar replaces plain "Score: +0.20"
+            st.markdown(sentiment_bar_html(ai["score"]), unsafe_allow_html=True)
 
         with c5:
             st.markdown(f"**{action_badge(ai['action'])}**")
@@ -812,17 +1060,62 @@ for ticker in visible_tickers:
         if ai.get("summary"):
             st.markdown(f"💬 _{ai['summary']}_")
 
-        # NEWS BRIEFING - the new prose summary of all the news for this stock
-        if ai.get("news_briefing"):
-            st.markdown(
-                f"<div class='news-briefing'>"
-                f"<div class='briefing-label'>📋 News briefing</div>"
-                f"<div class='briefing-body'>{ai['news_briefing']}</div>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
+        # DIP-BUY ANALYSIS — strategy-specific scoring
+        dip = dip_buy_score(ticker, price, ai, card)
+        st.markdown(
+            f"<div class='dip-buy-card' style='border-left: 4px solid {dip['color']};'>"
+            f"<div class='dip-buy-score' style='color: {dip['color']};'>{dip['score']}<span style='font-size:0.5em; color:#94a3b8;'>/100</span></div>"
+            f"<div style='flex:1;'>"
+            f"<div class='dip-buy-tag'>Dip-Buy Score</div>"
+            f"<div class='dip-buy-status' style='color: {dip['color']};'>{dip['status']}</div>"
+            f"</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
 
-        # PER-HEADLINE BREAKDOWN - the new feature you asked for
+        # NEWS BRIEFING — now small dropdown as you asked
+        if ai.get("news_briefing"):
+            with st.expander("📋 Read full news briefing"):
+                st.markdown(
+                    f"<div class='news-briefing-mini'>{ai['news_briefing']}</div>",
+                    unsafe_allow_html=True
+                )
+
+        # DIP-BUY REASONING — small dropdown
+        if dip["reasons_pos"] or dip["reasons_neg"]:
+            with st.expander(f"🎯 Why dip-buy score is {dip['score']}/100"):
+                if dip["reasons_pos"]:
+                    st.markdown("**✓ Working in favor of a dip-buy:**")
+                    for r in dip["reasons_pos"]:
+                        st.markdown(f"- {r}")
+                if dip["reasons_neg"]:
+                    st.markdown("**✗ Working against a dip-buy:**")
+                    for r in dip["reasons_neg"]:
+                        st.markdown(f"- {r}")
+                # Action prompt based on score
+                if dip["score"] >= 65:
+                    st.markdown(
+                        "<div style='margin-top:10px; padding:10px; background:#ecfdf5; border-radius:6px; "
+                        "color:#047857; font-weight:600;'>"
+                        "💡 Strong dip-buy candidate. Run pre-trade checklist (PDF playbook), set 5-7% stop, max €30 risk.</div>",
+                        unsafe_allow_html=True
+                    )
+                elif dip["score"] >= 45:
+                    st.markdown(
+                        "<div style='margin-top:10px; padding:10px; background:#fffbeb; border-radius:6px; "
+                        "color:#92400e; font-weight:600;'>"
+                        "💡 Mild setup. Watch for confirmation (RSI turning, volume on bounce) before entering.</div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        "<div style='margin-top:10px; padding:10px; background:#f1f5f9; border-radius:6px; "
+                        "color:#475569;'>"
+                        "💡 Not a buyable dip right now. Check back later or look at another stock.</div>",
+                        unsafe_allow_html=True
+                    )
+
+        # PER-HEADLINE BREAKDOWN
         with st.expander(f"📃 Headlines with AI verdict for {ticker} ({card['news_count']} items)"):
             cc1, cc2 = st.columns([3, 1.2])
             with cc1:
