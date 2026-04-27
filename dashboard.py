@@ -18,7 +18,7 @@ NOT a buy/sell signal generator. A news triage tool.
 import os
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -157,7 +157,7 @@ def ai_analyze_stock(ticker: str, headlines: list[str]) -> dict:
 
 Analyze recent news for {ticker} ({company}, sector: {sector}).
 
-Headlines:
+Headlines (each prefixed with age — RECENT news (last 6h) matters most, OLD news (3+ days) is mostly stale):
 {headlines_numbered}
 
 Respond ONLY with valid JSON (no markdown, no preamble):
@@ -180,7 +180,7 @@ ALWAYS NEUTRAL (no exceptions):
 - "Best stocks to buy", "Top picks", "X stocks to watch" → listicle clickbait, NEUTRAL
 - "Ways to play", "Options strategy", "How to trade" → educational/strategy, NEUTRAL
 - "Compared to peers", "X vs Y", "Which is better" → comparison filler, NEUTRAL
-- Headlines from 7+ days ago → stale, NEUTRAL
+- Headlines older than 3 days [3d ago+] → mostly stale, lean NEUTRAL unless story still developing
 - General market/sector commentary that doesn't name {ticker} specifically → NEUTRAL
 
 NEVER spin BAD news as GOOD:
@@ -405,22 +405,113 @@ def fetch_price_data(ticker: str) -> dict:
         return {"error": str(e)}
 
 
+def _parse_news_timestamp(time_str: str) -> Optional[datetime]:
+    """Parse various timestamp formats into datetime. Returns None if unparseable."""
+    if not time_str:
+        return None
+    # Try ISO format (Yahoo new format: "2026-04-27T14:30:00Z")
+    try:
+        # Handle Z suffix
+        cleaned = time_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt
+    except (ValueError, TypeError):
+        pass
+    # Try Unix timestamp (Yahoo old format)
+    try:
+        ts = int(time_str)
+        return datetime.fromtimestamp(ts)
+    except (ValueError, TypeError):
+        pass
+    # Try RFC822 (Google News RSS format: "Mon, 27 Apr 2026 14:30:00 GMT")
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(time_str)
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _format_age(pub_dt: Optional[datetime]) -> str:
+    """Format datetime as relative age: '2h ago', '3d ago'."""
+    if pub_dt is None:
+        return "?"
+    now = datetime.now()
+    delta = now - pub_dt
+    seconds = delta.total_seconds()
+    if seconds < 0:
+        return "just now"  # future timestamp = clock skew, treat as fresh
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    if seconds < 604800:
+        return f"{int(seconds // 86400)}d ago"
+    return pub_dt.strftime("%b %d")
+
+
+def _relevance_score(title: str, ticker: str, company: str) -> str:
+    """
+    Tag headline relevance.
+    HIGH: mentions ticker or company name directly
+    MED:  about the sector/competitors
+    LOW:  generic market commentary, listicles
+    """
+    title_lower = title.lower()
+    company_short = company.lower().split()[0]  # "NVIDIA" from "NVIDIA Corp"
+
+    # HIGH: explicit mention
+    if ticker.lower() in title_lower or company.lower() in title_lower or company_short in title_lower:
+        return "HIGH"
+
+    # LOW: clear listicle/generic patterns
+    low_patterns = [
+        "best stocks", "top stocks", "stocks to buy", "stocks to watch",
+        "stocks to avoid", "things to know", "what to know",
+        "market wrap", "market roundup", "stocks moving", "movers and shakers",
+        "biggest gainers", "biggest losers", "premarket", "after hours",
+        "analyst picks", "wall street", "today's top",
+    ]
+    if any(p in title_lower for p in low_patterns):
+        return "LOW"
+
+    # MEDIUM: probably sector/competitor relevant
+    return "MEDIUM"
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_news_yahoo(ticker: str) -> list[dict]:
+    """Yahoo news with timestamp parsing + relevance tagging."""
     try:
         t = yf.Ticker(ticker)
         news = t.news or []
+        company = WATCHLIST.get(ticker, {}).get("name", ticker)
         items = []
-        for n in news[:15]:
+        for n in news[:20]:
             content = n.get("content", n)
             title = content.get("title") or n.get("title", "")
-            pub_date = content.get("pubDate") or content.get("displayTime") or ""
+            pub_raw = (content.get("pubDate") or content.get("displayTime") or
+                       n.get("providerPublishTime") or "")
             click_through = content.get("clickThroughUrl") or {}
             canonical = content.get("canonicalUrl") or {}
             link = click_through.get("url") or canonical.get("url") or n.get("link", "")
             publisher = content.get("provider", {}).get("displayName") or n.get("publisher", "")
-            if title:
-                items.append({"title": title, "publisher": publisher, "link": link, "time": pub_date})
+            if not title:
+                continue
+            pub_dt = _parse_news_timestamp(str(pub_raw))
+            items.append({
+                "title": title,
+                "publisher": publisher,
+                "link": link,
+                "pub_dt": pub_dt,
+                "age_str": _format_age(pub_dt),
+                "relevance": _relevance_score(title, ticker, company),
+            })
         return items
     except Exception:
         return []
@@ -428,17 +519,26 @@ def fetch_news_yahoo(ticker: str) -> list[dict]:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_news_google(ticker: str, name: str) -> list[dict]:
+    """Google News RSS — using ticker symbol for higher relevance."""
     try:
-        query = f"{name}+stock"
+        # Search for ticker symbol first (more specific than company name)
+        query = f"%22{ticker}%22+stock"  # %22 = quotes for exact match
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(url)
         items = []
-        for entry in feed.entries[:10]:
+        for entry in feed.entries[:15]:
+            title = entry.get("title", "")
+            if not title:
+                continue
+            pub_raw = entry.get("published", "")
+            pub_dt = _parse_news_timestamp(pub_raw)
             items.append({
-                "title": entry.get("title", ""),
+                "title": title,
                 "publisher": entry.get("source", {}).get("title", "Google News"),
                 "link": entry.get("link", ""),
-                "time": entry.get("published", ""),
+                "pub_dt": pub_dt,
+                "age_str": _format_age(pub_dt),
+                "relevance": _relevance_score(title, ticker, name),
             })
         return items
     except Exception:
@@ -897,22 +997,61 @@ ordered_tickers = sorted(WATCHLIST.keys(), key=sort_key)
 def build_stock_card_data(ticker: str) -> dict:
     meta = WATCHLIST[ticker]
     price = fetch_price_data(ticker)
+
+    # Pull both sources and merge
     yh_news = fetch_news_yahoo(ticker)
-    if len(yh_news) < 3:
-        gn_news = fetch_news_google(ticker, meta["name"])
-        seen = {n["title"][:50] for n in yh_news}
-        for n in gn_news:
-            if n["title"][:50] not in seen:
-                yh_news.append(n)
-                seen.add(n["title"][:50])
-    headlines = [n["title"] for n in yh_news[:8]]
+    gn_news = fetch_news_google(ticker, meta["name"])
+    seen = set()
+    combined = []
+    for n in yh_news + gn_news:
+        key = n["title"][:60].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(n)
+
+    # Drop LOW-relevance items if we have enough HIGH/MEDIUM ones
+    high_med = [n for n in combined if n["relevance"] in ("HIGH", "MEDIUM")]
+    if len(high_med) >= 4:
+        combined = high_med
+
+    # Drop items older than 7 days (stale)
+    fresh_cutoff = datetime.now() - timedelta(days=7)
+    fresh = [n for n in combined if (n["pub_dt"] is None or n["pub_dt"] >= fresh_cutoff)]
+    if len(fresh) >= 4:
+        combined = fresh
+
+    # Sort: HIGH relevance first, then by recency
+    relevance_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    def sort_key(n):
+        rel = relevance_rank.get(n["relevance"], 3)
+        # Newer first → negate timestamp for ascending sort
+        ts = n["pub_dt"].timestamp() if n["pub_dt"] else 0
+        return (rel, -ts)
+    combined.sort(key=sort_key)
+
+    # Take top 8 for display & AI analysis
+    final_news = combined[:8]
+
+    # Pass headlines WITH age annotation so AI weights recent news more
+    headlines = []
+    for n in final_news:
+        age = n.get("age_str", "?")
+        headlines.append(f"[{age}] {n['title']}")
+
     ai = ai_analyze_stock(ticker, headlines)
-    macros = detect_macro_in_headlines(headlines)
+    macros = detect_macro_in_headlines([n["title"] for n in final_news])
     earnings = fetch_earnings_date(ticker)
+
+    # Count how many are recent (last 24h) — key signal of "something happening"
+    recent_24h = sum(1 for n in final_news
+                     if n["pub_dt"] and (datetime.now() - n["pub_dt"]).total_seconds() < 86400)
+
     return {
-        "meta": meta, "price": price, "news": yh_news[:8],
+        "meta": meta, "price": price, "news": final_news,
         "ai": ai, "macros": macros, "earnings": earnings,
-        "news_count": len(yh_news),
+        "news_count": len(combined),
+        "recent_24h": recent_24h,
     }
 
 
@@ -1049,6 +1188,11 @@ for ticker in visible_tickers:
             badges = []
             if card["earnings"]:
                 badges.append(f"🚫 Earnings {card['earnings']}")
+            recent_24h = card.get("recent_24h", 0)
+            if recent_24h >= 3:
+                badges.append(f"🔥 {recent_24h} fresh today")
+            elif recent_24h == 0 and card["news_count"] > 0:
+                badges.append("💤 No fresh news")
             if card["news_count"] >= 8:
                 badges.append("⚡ High news vol")
             for m in card["macros"]:
@@ -1120,29 +1264,58 @@ for ticker in visible_tickers:
             cc1, cc2 = st.columns([3, 1.2])
             with cc1:
                 if ai.get("headline_analysis"):
-                    url_map = {n["title"]: n.get("link", "") for n in card["news"]}
-                    pub_map = {n["title"]: n.get("publisher", "") for n in card["news"]}
+                    # Build lookup that handles "[Xh ago] Title" format from AI
+                    def strip_prefix(s: str) -> str:
+                        # Remove "[2h ago] " or "[3d ago] " etc.
+                        return re.sub(r"^\[[^\]]+\]\s*", "", s)
+                    news_lookup = {n["title"]: n for n in card["news"]}
                     for item in ai["headline_analysis"]:
-                        h = item["headline"]
-                        url = url_map.get(h, "")
-                        pub = pub_map.get(h, "")
-                        title_html = f"<a href='{url}' target='_blank'>{h}</a>" if url else h
+                        h_with_prefix = item["headline"]
+                        h_clean = strip_prefix(h_with_prefix)
+                        n = news_lookup.get(h_clean) or news_lookup.get(h_with_prefix, {})
+                        url = n.get("link", "")
+                        pub = n.get("publisher", "")
+                        age = n.get("age_str", "?")
+                        relevance = n.get("relevance", "MEDIUM")
+                        title_html = f"<a href='{url}' target='_blank'>{h_clean}</a>" if url else h_clean
                         why = item.get("why", "")
+
+                        # Relevance badge
+                        if relevance == "HIGH":
+                            rel_badge = "<span style='background:#dbeafe;color:#1e40af;padding:1px 5px;border-radius:3px;font-size:0.7em;font-weight:600;'>DIRECT</span>"
+                        elif relevance == "LOW":
+                            rel_badge = "<span style='background:#f1f5f9;color:#94a3b8;padding:1px 5px;border-radius:3px;font-size:0.7em;'>GENERIC</span>"
+                        else:
+                            rel_badge = ""
+
+                        # Age coloring: fresh news = green, stale = gray
+                        if "m ago" in age or "just now" in age:
+                            age_color = "#15803d"  # very fresh
+                        elif "h ago" in age:
+                            hours = int(age.split("h")[0]) if age.split("h")[0].isdigit() else 99
+                            age_color = "#15803d" if hours < 6 else "#0891b2" if hours < 24 else "#94a3b8"
+                        else:
+                            age_color = "#94a3b8"
+
+                        age_html = f"<span style='color:{age_color}; font-weight:600; font-size:0.78em;'>🕐 {age}</span>"
+
                         st.markdown(
                             f"<div class='headline-row'>"
                             f"<div class='impact-cell'>{impact_badge(item['impact'])}</div>"
                             f"<div class='headline-cell'>"
-                            f"<div class='headline-title'>{title_html}</div>"
-                            f"<div class='headline-why'>→ {why} <span style='color:#94a3b8'>· {pub}</span></div>"
+                            f"<div class='headline-title'>{title_html} {rel_badge}</div>"
+                            f"<div class='headline-why'>→ {why} "
+                            f"<span style='color:#94a3b8'>· {pub} · </span>{age_html}</div>"
                             f"</div></div>",
                             unsafe_allow_html=True
                         )
                 else:
                     for n in card["news"]:
+                        age = n.get("age_str", "?")
                         if n["link"]:
-                            st.markdown(f"- [{n['title']}]({n['link']}) · _{n['publisher']}_")
+                            st.markdown(f"- [{n['title']}]({n['link']}) · _{n['publisher']}_ · 🕐 {age}")
                         else:
-                            st.markdown(f"- {n['title']} · _{n['publisher']}_")
+                            st.markdown(f"- {n['title']} · _{n['publisher']}_ · 🕐 {age}")
 
             with cc2:
                 st.markdown("**Technicals:**")
