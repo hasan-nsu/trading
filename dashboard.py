@@ -153,34 +153,63 @@ def ai_analyze_stock(ticker: str, headlines: list[str]) -> dict:
     sector = WATCHLIST.get(ticker, {}).get("sector", "")
     headlines_numbered = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headlines[:8]))
 
-    prompt = f"""You are a sharp equity research analyst. Analyze recent news for {ticker} ({company}, sector: {sector}).
+    prompt = f"""You are a STRICT, skeptical equity research analyst. Most financial headlines are NOISE, not SIGNAL. Your default rating is NEUTRAL. Only rate GOOD or BAD when there is a clear, concrete, material catalyst.
 
-For EACH headline below, judge: is THIS specific news GOOD, BAD, or NEUTRAL for {ticker}'s stock price over the next 1-4 weeks? Give a SHORT specific reason (under 15 words).
-
-Then give an overall verdict.
+Analyze recent news for {ticker} ({company}, sector: {sector}).
 
 Headlines:
 {headlines_numbered}
 
-Respond ONLY with valid JSON in this structure (no markdown, no extra text):
+Respond ONLY with valid JSON (no markdown, no preamble):
 {{
   "headlines": [
-    {{"n": 1, "impact": "GOOD" or "BAD" or "NEUTRAL", "why": "short specific reason"}},
-    {{"n": 2, "impact": "...", "why": "..."}}
+    {{"n": 1, "impact": "GOOD"|"BAD"|"NEUTRAL", "why": "short specific reason, max 15 words"}}
   ],
-  "overall_sentiment": "POSITIVE" or "NEGATIVE" or "MIXED" or "NEUTRAL",
+  "news_briefing": "PLAIN-LANGUAGE PARAGRAPH of 4-6 sentences summarizing ALL the news as a story. Tell the user what is happening with this stock right now. Mention concrete events (earnings, products, deals, lawsuits, sector moves). Connect related headlines. Mention specific competitors or events by name when relevant. End with a 1-sentence bottom line: what does this collectively mean for the stock? Write naturally like you're briefing a colleague over coffee. NO bullet points. NO repeating headlines verbatim.",
+  "overall_sentiment": "POSITIVE"|"NEGATIVE"|"MIXED"|"NEUTRAL",
   "overall_score": -1.0 to 1.0,
-  "summary": "2-3 sentences explaining the overall picture and WHY. Be specific. Mention concrete drivers (earnings, guidance, products, lawsuits, sector moves). No filler.",
-  "action": "WATCH" or "INVESTIGATE" or "IGNORE"
+  "summary": "1 SHORT sentence with the bottom-line take, max 20 words.",
+  "action": "WATCH"|"INVESTIGATE"|"IGNORE"
 }}
 
-Rules:
-- "GOOD" = likely to push stock up. "BAD" = likely to push down. "NEUTRAL" = noise / already priced / no impact.
-- Analyst upgrade=GOOD. Downgrade=BAD. Earnings beat=GOOD. Earnings miss=BAD. Lawsuit=BAD. Buyback=GOOD.
-- "Stock rises X%" headlines are NEUTRAL (after-the-fact reporting).
-- "Could", "may", "what to expect" headlines are usually NEUTRAL speculation.
-- INVESTIGATE = something material is happening. IGNORE = routine noise.
-- Be honest. Don't manufacture signal where there is none."""
+STRICT RULES — these override everything else:
+
+ALWAYS NEUTRAL (no exceptions):
+- "Will X happen?", "Could X end?", "Is X over?", "What to expect" → speculation, NEUTRAL
+- "Stock rose X%", "Stock fell X%" → after-the-fact reporting, no new info, NEUTRAL
+- "Best stocks to buy", "Top picks", "X stocks to watch" → listicle clickbait, NEUTRAL
+- "Ways to play", "Options strategy", "How to trade" → educational/strategy, NEUTRAL
+- "Compared to peers", "X vs Y", "Which is better" → comparison filler, NEUTRAL
+- Headlines from 7+ days ago → stale, NEUTRAL
+- General market/sector commentary that doesn't name {ticker} specifically → NEUTRAL
+
+NEVER spin BAD news as GOOD:
+- "Tech stocks slide" / "Sector sells off" → BAD for {ticker} if it's in that sector. Do NOT call this a "buying opportunity."
+- Cathie Wood / institutional selling → BAD, period. Do not soften.
+- Insider selling → BAD.
+- Industry-wide negative news → BAD if {ticker} is in that industry.
+
+Real GOOD catalysts (use sparingly):
+- Earnings BEAT with raised guidance
+- Major product launch or successful rollout
+- Big new contract / customer win (specific, named)
+- Analyst UPGRADE from a major bank
+- Buyback announcement, dividend raise
+- Direct competitor stumbles in a way that benefits {ticker}
+- Insider BUYING
+
+Real BAD catalysts (use sparingly):
+- Earnings MISS or cut guidance
+- Product recall, safety issue, FDA rejection
+- Lawsuit / fraud probe / regulatory action
+- Analyst DOWNGRADE from a major bank
+- Insider/institutional SELLING
+- CEO/CFO departure under cloud
+- Major customer/contract loss
+
+If most headlines are speculation, listicles, or noise → overall_sentiment is NEUTRAL and action is IGNORE. That is the CORRECT answer most days. Do not invent signal.
+
+Be honest. Be skeptical. Default to NEUTRAL."""
 
     try:
         response = client.chat.completions.create(
@@ -189,7 +218,7 @@ Rules:
                 {"role": "system", "content": "You are a precise financial analyst. You output ONLY valid JSON."},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=1500,
+            max_tokens=2000,
             temperature=0.2,
             response_format={"type": "json_object"},
         )
@@ -212,6 +241,7 @@ Rules:
             "sentiment": str(parsed.get("overall_sentiment", "NEUTRAL")).upper(),
             "score": float(parsed.get("overall_score", 0.0)),
             "summary": str(parsed.get("summary", "")),
+            "news_briefing": str(parsed.get("news_briefing", "")),
             "action": str(parsed.get("action", "IGNORE")).upper(),
             "headline_analysis": per_headline,
             "source": "ai",
@@ -226,6 +256,7 @@ def _fallback_sentiment(headlines: list[str], error: str = "") -> dict:
         return {
             "sentiment": "QUIET", "score": 0.0,
             "summary": "No recent news for this ticker.",
+            "news_briefing": "",
             "action": "IGNORE", "headline_analysis": [],
             "source": f"fallback{(' (' + error + ')') if error else ''}",
         }
@@ -262,8 +293,14 @@ def _fallback_sentiment(headlines: list[str], error: str = "") -> dict:
             sent, action = "MIXED", "WATCH"
             summary = "Mixed signals in headlines. AI unavailable for deeper analysis."
 
+    # Build a simple briefing from headlines when AI is unavailable
+    briefing = ("AI is currently unavailable, so this is a keyword-based view: " +
+                " ".join(headlines[:5])[:600] +
+                " — verify by reading the full headlines below.")
+
     return {
         "sentiment": sent, "score": score, "summary": summary,
+        "news_briefing": briefing,
         "action": action, "headline_analysis": per_headline,
         "source": f"fallback{(' (' + error + ')') if error else ''}",
     }
@@ -539,6 +576,26 @@ h1 { font-family: 'Georgia', serif; }
     margin: 4px 0; font-size: 0.9em; color: #166534;
 }
 .macro-affected.bad { background: #fef2f2; color: #991b1b; }
+.news-briefing {
+    background: #f8fafc;
+    border-left: 3px solid #0891b2;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 8px 0 6px 0;
+}
+.briefing-label {
+    font-size: 0.75em;
+    font-weight: 700;
+    color: #0891b2;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+.briefing-body {
+    font-size: 0.92em;
+    line-height: 1.55;
+    color: #334155;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -751,9 +808,19 @@ for ticker in visible_tickers:
             if badges:
                 st.caption(" · ".join(badges))
 
-        # Real summary with reasoning
+        # Quick bottom-line summary (1 sentence)
         if ai.get("summary"):
             st.markdown(f"💬 _{ai['summary']}_")
+
+        # NEWS BRIEFING - the new prose summary of all the news for this stock
+        if ai.get("news_briefing"):
+            st.markdown(
+                f"<div class='news-briefing'>"
+                f"<div class='briefing-label'>📋 News briefing</div>"
+                f"<div class='briefing-body'>{ai['news_briefing']}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
 
         # PER-HEADLINE BREAKDOWN - the new feature you asked for
         with st.expander(f"📃 Headlines with AI verdict for {ticker} ({card['news_count']} items)"):
