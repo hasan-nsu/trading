@@ -1,17 +1,24 @@
 """
-Swing Trader Dashboard
-======================
-News + AI sentiment analysis for a curated watchlist.
+Swing Trader Dashboard v2
+==========================
+News + AI sentiment analysis for a curated watchlist of 20 stocks.
 Designed for swing trading (days to weeks holding period).
 
-NOT a buy/sell signal generator. A news triage tool.
+KEY UPGRADES FROM v1:
+- Per-headline AI verdict (each news item: GOOD/BAD/NEUTRAL + WHY for that stock)
+- Real summaries with reasoning, not 3-word labels
+- JSON output (more reliable parsing)
+- Cross-stock impact: macro news -> which of YOUR stocks are affected
+- Better error visibility
+- Added AAPL + AMZN
 
-Author: Built for Shakil
+NOT a buy/sell signal generator. A news triage tool.
 """
 
 import os
-import time
-from datetime import datetime, timedelta
+import json
+import re
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
@@ -32,46 +39,36 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Watchlist with metadata
+# Watchlist - 20 STOCKS (added AAPL + AMZN)
 WATCHLIST = {
-    # YOUR CORE THREE
     "NVDA":  {"name": "NVIDIA",          "sector": "Tech/AI",        "type": "swing",  "priority": "high"},
     "AMD":   {"name": "AMD",             "sector": "Tech/AI",        "type": "swing",  "priority": "high"},
     "TSLA":  {"name": "Tesla",           "sector": "Auto/Tech",      "type": "swing",  "priority": "high"},
-    # TECH ADDS
+    "AAPL":  {"name": "Apple",           "sector": "Tech/Consumer",  "type": "swing",  "priority": "high"},
+    "AMZN":  {"name": "Amazon",          "sector": "Tech/Retail",    "type": "swing",  "priority": "high"},
     "PLTR":  {"name": "Palantir",        "sector": "Tech/AI",        "type": "swing",  "priority": "med"},
     "SHOP":  {"name": "Shopify",         "sector": "Tech/Consumer",  "type": "swing",  "priority": "med"},
     "NET":   {"name": "Cloudflare",      "sector": "Tech/Cyber",     "type": "swing",  "priority": "med"},
-    # FINANCIAL
     "JPM":   {"name": "JPMorgan",        "sector": "Financials",     "type": "swing",  "priority": "med"},
     "BAC":   {"name": "Bank of America", "sector": "Financials",     "type": "swing",  "priority": "med"},
-    # CYCLICAL
     "F":     {"name": "Ford",            "sector": "Auto/Cyclical",  "type": "swing",  "priority": "med"},
-    # CONSUMER
     "DIS":   {"name": "Disney",          "sector": "Consumer/Media", "type": "swing",  "priority": "med"},
     "NKE":   {"name": "Nike",            "sector": "Consumer",       "type": "swing",  "priority": "med"},
-    # ENERGY (war/oil news driver)
     "XOM":   {"name": "ExxonMobil",      "sector": "Energy",         "type": "swing",  "priority": "med"},
     "OXY":   {"name": "Occidental",      "sector": "Energy",         "type": "swing",  "priority": "med"},
-    # HEALTHCARE
     "PFE":   {"name": "Pfizer",          "sector": "Healthcare",     "type": "swing",  "priority": "med"},
-    # CRYPTO/VOL
     "COIN":  {"name": "Coinbase",        "sector": "Crypto/Fin",     "type": "swing",  "priority": "med"},
-    # STABLE LONG-TERM
     "MSFT":  {"name": "Microsoft",       "sector": "Tech",           "type": "stable", "priority": "low"},
     "JNJ":   {"name": "Johnson&Johnson", "sector": "Healthcare",     "type": "stable", "priority": "low"},
     "BRK-B": {"name": "Berkshire B",     "sector": "Diversified",    "type": "stable", "priority": "low"},
 }
 
-# Correlated pairs - warn if user opens both at same time
 CORRELATED_PAIRS = [
-    ("NVDA", "AMD"),    # both AI chips
-    ("AMD", "PLTR"),    # AI narrative
-    ("JPM", "BAC"),     # both big banks
-    ("XOM", "OXY"),     # both oil
+    ("NVDA", "AMD"), ("AMD", "PLTR"), ("NVDA", "PLTR"),
+    ("JPM", "BAC"), ("XOM", "OXY"),
+    ("AAPL", "MSFT"), ("AMZN", "SHOP"),
 ]
 
-# Macro events to flag
 MACRO_KEYWORDS = {
     "fed":      ["fed", "fomc", "powell", "interest rate", "rate cut", "rate hike", "federal reserve"],
     "war":      ["war", "ukraine", "russia", "israel", "gaza", "iran", "missile", "invasion", "ceasefire"],
@@ -79,12 +76,11 @@ MACRO_KEYWORDS = {
     "macro":    ["inflation", "cpi", "ppi", "unemployment", "gdp", "recession", "yield curve"],
 }
 
-# Sentiment keywords (fallback when AI unavailable)
 POSITIVE_WORDS = {
     "beat", "beats", "surge", "soar", "rally", "rallies", "jump", "gain", "rises", "rose",
     "strong", "record", "growth", "profit", "upgrade", "upgrades", "positive", "outperform",
     "buy", "bullish", "exceed", "exceeds", "boost", "boosts", "approval", "win", "wins",
-    "raised", "raises", "tops", "topped", "breakthrough", "expansion",
+    "raised", "raises", "tops", "topped", "breakthrough", "expansion", "explosive",
 }
 
 NEGATIVE_WORDS = {
@@ -92,16 +88,15 @@ NEGATIVE_WORDS = {
     "weak", "loss", "losses", "downgrade", "downgrades", "negative", "underperform",
     "sell", "bearish", "concern", "concerns", "worry", "fear", "fears", "warning",
     "lawsuit", "investigation", "probe", "fraud", "decline", "cuts", "cut", "layoff",
-    "layoffs", "bankruptcy", "missed", "slump",
+    "layoffs", "bankruptcy", "missed", "slump", "shortage", "overvalued",
 }
 
 
 # ============================================================================
-# AI BRAIN (GROQ)
+# AI BRAIN - REWRITTEN FOR PER-HEADLINE ANALYSIS
 # ============================================================================
 
 def get_groq_client() -> Optional[Groq]:
-    """Initialize Groq client from secrets or env. Returns None if not configured."""
     api_key = None
     try:
         api_key = st.secrets.get("GROQ_API_KEY")
@@ -117,201 +112,278 @@ def get_groq_client() -> Optional[Groq]:
         return None
 
 
-@st.cache_data(ttl=1800, show_spinner=False)  # 30 min cache
-def ai_summarize_stock(ticker: str, headlines: list[str]) -> dict:
-    """Send headlines to Groq, get back sentiment + summary.
+def _extract_json(text: str) -> Optional[dict]:
+    """Robust JSON extraction - handles markdown wrapping or preamble."""
+    if not text:
+        return None
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+    obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if obj_match:
+        try:
+            return json.loads(obj_match.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
 
-    Returns dict with: sentiment (str), score (-1 to +1), summary (str), action (str)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ai_analyze_stock(ticker: str, headlines: list[str]) -> dict:
+    """
+    Per-headline impact analysis + overall verdict for a stock.
+
+    Returns:
+      sentiment, score, summary (with reasoning), action,
+      headline_analysis (list of {headline, impact, why}),
+      source, error
     """
     client = get_groq_client()
     if not client or not headlines:
         return _fallback_sentiment(headlines)
 
-    headlines_text = "\n".join(f"- {h}" for h in headlines[:10])
-    prompt = f"""Analyze these recent news headlines about {ticker} ({WATCHLIST.get(ticker, {}).get('name', ticker)}).
+    company = WATCHLIST.get(ticker, {}).get("name", ticker)
+    sector = WATCHLIST.get(ticker, {}).get("sector", "")
+    headlines_numbered = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headlines[:8]))
+
+    prompt = f"""You are a sharp equity research analyst. Analyze recent news for {ticker} ({company}, sector: {sector}).
+
+For EACH headline below, judge: is THIS specific news GOOD, BAD, or NEUTRAL for {ticker}'s stock price over the next 1-4 weeks? Give a SHORT specific reason (under 15 words).
+
+Then give an overall verdict.
 
 Headlines:
-{headlines_text}
+{headlines_numbered}
 
-Respond with EXACTLY this format (no extra text):
-SENTIMENT: [POSITIVE/NEGATIVE/MIXED/NEUTRAL]
-SCORE: [number from -1.0 to 1.0]
-SUMMARY: [one sentence, max 25 words]
-ACTION: [WATCH/INVESTIGATE/IGNORE]
+Respond ONLY with valid JSON in this structure (no markdown, no extra text):
+{{
+  "headlines": [
+    {{"n": 1, "impact": "GOOD" or "BAD" or "NEUTRAL", "why": "short specific reason"}},
+    {{"n": 2, "impact": "...", "why": "..."}}
+  ],
+  "overall_sentiment": "POSITIVE" or "NEGATIVE" or "MIXED" or "NEUTRAL",
+  "overall_score": -1.0 to 1.0,
+  "summary": "2-3 sentences explaining the overall picture and WHY. Be specific. Mention concrete drivers (earnings, guidance, products, lawsuits, sector moves). No filler.",
+  "action": "WATCH" or "INVESTIGATE" or "IGNORE"
+}}
 
-Be honest. If headlines are routine/noise, say NEUTRAL and IGNORE. Only say INVESTIGATE if something material is happening."""
+Rules:
+- "GOOD" = likely to push stock up. "BAD" = likely to push down. "NEUTRAL" = noise / already priced / no impact.
+- Analyst upgrade=GOOD. Downgrade=BAD. Earnings beat=GOOD. Earnings miss=BAD. Lawsuit=BAD. Buyback=GOOD.
+- "Stock rises X%" headlines are NEUTRAL (after-the-fact reporting).
+- "Could", "may", "what to expect" headlines are usually NEUTRAL speculation.
+- INVESTIGATE = something material is happening. IGNORE = routine noise.
+- Be honest. Don't manufacture signal where there is none."""
 
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.3,
+            messages=[
+                {"role": "system", "content": "You are a precise financial analyst. You output ONLY valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1500,
+            temperature=0.2,
+            response_format={"type": "json_object"},
         )
         text = response.choices[0].message.content
-        return _parse_ai_response(text, headlines)
+        parsed = _extract_json(text)
+        if not parsed:
+            return _fallback_sentiment(headlines, error="JSON parse failed")
+
+        per_headline = []
+        for item in parsed.get("headlines", []):
+            n = item.get("n", 0)
+            if 1 <= n <= len(headlines):
+                per_headline.append({
+                    "headline": headlines[n-1],
+                    "impact": str(item.get("impact", "NEUTRAL")).upper(),
+                    "why": str(item.get("why", "")),
+                })
+
+        return {
+            "sentiment": str(parsed.get("overall_sentiment", "NEUTRAL")).upper(),
+            "score": float(parsed.get("overall_score", 0.0)),
+            "summary": str(parsed.get("summary", "")),
+            "action": str(parsed.get("action", "IGNORE")).upper(),
+            "headline_analysis": per_headline,
+            "source": "ai",
+        }
     except Exception as e:
         return _fallback_sentiment(headlines, error=str(e))
 
 
-def _parse_ai_response(text: str, headlines: list[str]) -> dict:
-    """Parse the structured AI response."""
-    result = {"sentiment": "NEUTRAL", "score": 0.0, "summary": "", "action": "IGNORE", "source": "ai"}
-    for line in text.split("\n"):
-        line = line.strip()
-        if line.upper().startswith("SENTIMENT:"):
-            result["sentiment"] = line.split(":", 1)[1].strip().upper()
-        elif line.upper().startswith("SCORE:"):
-            try:
-                result["score"] = float(line.split(":", 1)[1].strip())
-            except ValueError:
-                result["score"] = 0.0
-        elif line.upper().startswith("SUMMARY:"):
-            result["summary"] = line.split(":", 1)[1].strip()
-        elif line.upper().startswith("ACTION:"):
-            result["action"] = line.split(":", 1)[1].strip().upper()
-    if not result["summary"] and headlines:
-        result["summary"] = headlines[0][:100]
-    return result
-
-
 def _fallback_sentiment(headlines: list[str], error: str = "") -> dict:
-    """Keyword-based sentiment when AI is unavailable."""
+    """Keyword fallback - now also produces per-headline output."""
     if not headlines:
-        return {"sentiment": "QUIET", "score": 0.0, "summary": "No recent news.",
-                "action": "IGNORE", "source": "fallback"}
-    pos = neg = 0
-    for h in headlines:
+        return {
+            "sentiment": "QUIET", "score": 0.0,
+            "summary": "No recent news for this ticker.",
+            "action": "IGNORE", "headline_analysis": [],
+            "source": f"fallback{(' (' + error + ')') if error else ''}",
+        }
+
+    per_headline = []
+    pos_total = neg_total = 0
+    for h in headlines[:8]:
         words = set(h.lower().split())
-        pos += len(words & POSITIVE_WORDS)
-        neg += len(words & NEGATIVE_WORDS)
-    total = pos + neg
+        pos = len(words & POSITIVE_WORDS)
+        neg = len(words & NEGATIVE_WORDS)
+        if pos > neg:
+            impact, why = "GOOD", "Contains positive keywords"
+        elif neg > pos:
+            impact, why = "BAD", "Contains negative keywords"
+        else:
+            impact, why = "NEUTRAL", "No clear sentiment"
+        per_headline.append({"headline": h, "impact": impact, "why": why})
+        pos_total += pos
+        neg_total += neg
+
+    total = pos_total + neg_total
     if total == 0:
         sent, score, action = "NEUTRAL", 0.0, "IGNORE"
+        summary = "No clear signal in headlines. Routine market noise."
     else:
-        score = (pos - neg) / max(total, 1)
+        score = (pos_total - neg_total) / max(total, 1)
         if score > 0.3:
             sent, action = "POSITIVE", "WATCH"
+            summary = "Headlines lean positive based on keyword analysis. AI unavailable for deeper analysis."
         elif score < -0.3:
             sent, action = "NEGATIVE", "INVESTIGATE"
+            summary = "Headlines lean negative based on keyword analysis. AI unavailable for deeper analysis."
         else:
             sent, action = "MIXED", "WATCH"
-    summary = (headlines[0] or "")[:100]
-    return {"sentiment": sent, "score": score, "summary": summary,
-            "action": action, "source": "fallback" + (f" ({error})" if error else "")}
+            summary = "Mixed signals in headlines. AI unavailable for deeper analysis."
+
+    return {
+        "sentiment": sent, "score": score, "summary": summary,
+        "action": action, "headline_analysis": per_headline,
+        "source": f"fallback{(' (' + error + ')') if error else ''}",
+    }
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def ai_macro_brief(macro_news: list[str]) -> str:
-    """Generate a daily macro brief from big news."""
+def ai_macro_brief(macro_news: list[str], watchlist_tickers: list[str]) -> dict:
+    """Macro brief + identifies which watchlist stocks are affected."""
     client = get_groq_client()
     if not client or not macro_news:
-        return ""
-    news_text = "\n".join(f"- {n}" for n in macro_news[:8])
-    prompt = f"""Summarize today's important macro/geopolitical news for a swing trader.
+        return {"brief": "", "winners": [], "losers": [], "source": "none"}
 
-News:
+    news_text = "\n".join(f"- {n}" for n in macro_news[:10])
+    tickers_text = ", ".join(watchlist_tickers)
+
+    prompt = f"""You are a macro analyst. Read today's macro/geopolitical news and identify impact on a watchlist.
+
+Today's macro news:
 {news_text}
 
-In 3 sentences max:
-1. What's the most important development?
-2. Which sectors are affected (positive/negative)?
-3. Should a swing trader be cautious today? Why or why not?
+Watchlist tickers: {tickers_text}
 
-Be direct. No fluff."""
+Respond ONLY with valid JSON:
+{{
+  "brief": "3 sentences max. (1) Most important macro development. (2) Which sectors helped/hurt. (3) Should a swing trader be cautious today and why?",
+  "winners": ["TICKER1", "TICKER2"],
+  "losers": ["TICKER3", "TICKER4"],
+  "winner_reason": "1 sentence why these benefit",
+  "loser_reason": "1 sentence why these suffer"
+}}
+
+Only include tickers from the watchlist. Be specific. If macro news has no clear stock impact, leave winners/losers empty."""
+
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=250,
-            temperature=0.3,
+            messages=[
+                {"role": "system", "content": "You output only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=600,
+            temperature=0.2,
+            response_format={"type": "json_object"},
         )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        return ""
+        parsed = _extract_json(response.choices[0].message.content)
+        if not parsed:
+            return {"brief": "", "winners": [], "losers": [], "source": "parse_failed"}
+
+        winners = [t.upper() for t in parsed.get("winners", []) if t.upper() in watchlist_tickers]
+        losers = [t.upper() for t in parsed.get("losers", []) if t.upper() in watchlist_tickers]
+
+        return {
+            "brief": str(parsed.get("brief", "")),
+            "winners": winners,
+            "losers": losers,
+            "winner_reason": str(parsed.get("winner_reason", "")),
+            "loser_reason": str(parsed.get("loser_reason", "")),
+            "source": "ai",
+        }
+    except Exception as e:
+        return {"brief": "", "winners": [], "losers": [], "source": f"error: {e}"}
 
 
 # ============================================================================
 # DATA FETCHING
 # ============================================================================
 
-@st.cache_data(ttl=300, show_spinner=False)  # 5 min cache
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_price_data(ticker: str) -> dict:
-    """Get current price, day change, week change, basic indicators."""
     try:
         t = yf.Ticker(ticker)
         hist = t.history(period="3mo", interval="1d")
         if hist.empty or len(hist) < 2:
             return {"error": "no data"}
-
         last = hist["Close"].iloc[-1]
         prev = hist["Close"].iloc[-2]
         day_pct = (last - prev) / prev * 100
-
         week_ago_idx = max(0, len(hist) - 6)
         week_ago = hist["Close"].iloc[week_ago_idx]
         week_pct = (last - week_ago) / week_ago * 100
-
-        # Simple 50-day MA position
         ma50 = hist["Close"].rolling(50).mean().iloc[-1] if len(hist) >= 50 else last
-        above_ma50 = last > ma50
-
-        # RSI calculation (14-day)
         delta = hist["Close"].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss.replace(0, 1e-9)
         rsi = (100 - 100 / (1 + rs)).iloc[-1]
-
-        # Volatility (ATR-ish)
         avg_range = ((hist["High"] - hist["Low"]) / hist["Close"]).rolling(20).mean().iloc[-1] * 100
-
-        # 52-week high/low position
         year_hist = t.history(period="1y", interval="1d")
         hi_52 = year_hist["High"].max() if not year_hist.empty else last
         lo_52 = year_hist["Low"].min() if not year_hist.empty else last
         pct_from_hi = (last - hi_52) / hi_52 * 100
-
         return {
-            "price": float(last),
-            "day_pct": float(day_pct),
-            "week_pct": float(week_pct),
+            "price": float(last), "day_pct": float(day_pct), "week_pct": float(week_pct),
             "rsi": float(rsi) if not pd.isna(rsi) else 50.0,
-            "above_ma50": bool(above_ma50),
+            "above_ma50": bool(last > ma50),
             "avg_daily_range": float(avg_range) if not pd.isna(avg_range) else 0.0,
-            "hi_52w": float(hi_52),
-            "lo_52w": float(lo_52),
+            "hi_52w": float(hi_52), "lo_52w": float(lo_52),
             "pct_from_hi": float(pct_from_hi),
-            "history": hist,
-            "error": None,
+            "history": hist, "error": None,
         }
     except Exception as e:
         return {"error": str(e)}
 
 
-@st.cache_data(ttl=900, show_spinner=False)  # 15 min cache
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_news_yahoo(ticker: str) -> list[dict]:
-    """Yahoo Finance news via yfinance."""
     try:
         t = yf.Ticker(ticker)
         news = t.news or []
         items = []
         for n in news[:15]:
-            content = n.get("content", n)  # newer yfinance nests under 'content'
+            content = n.get("content", n)
             title = content.get("title") or n.get("title", "")
             pub_date = content.get("pubDate") or content.get("displayTime") or ""
-            link = ""
             click_through = content.get("clickThroughUrl") or {}
             canonical = content.get("canonicalUrl") or {}
             link = click_through.get("url") or canonical.get("url") or n.get("link", "")
             publisher = content.get("provider", {}).get("displayName") or n.get("publisher", "")
             if title:
-                items.append({
-                    "title": title,
-                    "publisher": publisher,
-                    "link": link,
-                    "time": pub_date,
-                })
+                items.append({"title": title, "publisher": publisher, "link": link, "time": pub_date})
         return items
     except Exception:
         return []
@@ -319,7 +391,6 @@ def fetch_news_yahoo(ticker: str) -> list[dict]:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_news_google(ticker: str, name: str) -> list[dict]:
-    """Google News RSS as backup news source."""
     try:
         query = f"{name}+stock"
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
@@ -339,7 +410,6 @@ def fetch_news_google(ticker: str, name: str) -> list[dict]:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_macro_news() -> list[dict]:
-    """Pull macro/geopolitical news from Google News."""
     queries = [
         "federal+reserve+interest+rate",
         "ukraine+russia+war",
@@ -363,9 +433,8 @@ def fetch_macro_news() -> list[dict]:
     return all_items
 
 
-@st.cache_data(ttl=3600, show_spinner=False)  # 1h cache
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_market_overview() -> dict:
-    """SPY, QQQ, VIX, DAX overview."""
     out = {}
     for sym, label in [("^GSPC", "S&P 500"), ("^IXIC", "Nasdaq"), ("^VIX", "VIX"), ("^GDAXI", "DAX")]:
         try:
@@ -383,7 +452,6 @@ def fetch_market_overview() -> dict:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_earnings_date(ticker: str) -> Optional[str]:
-    """Get next earnings date if within 14 days."""
     try:
         t = yf.Ticker(ticker)
         cal = t.calendar
@@ -407,36 +475,27 @@ def fetch_earnings_date(ticker: str) -> Optional[str]:
 # UI HELPERS
 # ============================================================================
 
-def sentiment_color(sent: str) -> str:
-    return {
-        "POSITIVE": "#10b981",
-        "NEGATIVE": "#ef4444",
-        "MIXED": "#f59e0b",
-        "NEUTRAL": "#6b7280",
-        "QUIET": "#9ca3af",
-    }.get(sent.upper(), "#6b7280")
-
-
 def sentiment_icon(sent: str) -> str:
-    return {
-        "POSITIVE": "🟢",
-        "NEGATIVE": "🔴",
-        "MIXED": "🟡",
-        "NEUTRAL": "⚪",
-        "QUIET": "⚪",
-    }.get(sent.upper(), "⚪")
+    return {"POSITIVE": "🟢", "NEGATIVE": "🔴", "MIXED": "🟡",
+            "NEUTRAL": "⚪", "QUIET": "⚪"}.get(sent.upper(), "⚪")
+
+
+def impact_badge(impact: str) -> str:
+    """Per-headline impact label - the new feature."""
+    if impact == "GOOD":
+        return "<span style='background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:4px;font-weight:600;font-size:0.8em'>✓ GOOD</span>"
+    elif impact == "BAD":
+        return "<span style='background:#fee2e2;color:#b91c1c;padding:2px 8px;border-radius:4px;font-weight:600;font-size:0.8em'>✗ BAD</span>"
+    else:
+        return "<span style='background:#f1f5f9;color:#475569;padding:2px 8px;border-radius:4px;font-weight:600;font-size:0.8em'>— NEUTRAL</span>"
 
 
 def action_badge(action: str) -> str:
-    return {
-        "INVESTIGATE": "🔍 INVESTIGATE",
-        "WATCH":       "👁  WATCH",
-        "IGNORE":      "💤 IGNORE",
-    }.get(action.upper(), action)
+    return {"INVESTIGATE": "🔍 INVESTIGATE", "WATCH": "👁  WATCH",
+            "IGNORE": "💤 IGNORE"}.get(action.upper(), action)
 
 
 def detect_macro_in_headlines(headlines: list[str]) -> list[str]:
-    """Detect which macro categories are showing up."""
     found = set()
     text = " ".join(headlines).lower()
     for category, keywords in MACRO_KEYWORDS.items():
@@ -446,39 +505,40 @@ def detect_macro_in_headlines(headlines: list[str]) -> list[str]:
 
 
 # ============================================================================
-# UI: HEADER & STYLING
+# UI: STYLING
 # ============================================================================
 
 st.markdown("""
 <style>
 .main > div { padding-top: 1rem; }
-.stock-card {
-    background: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 12px;
-    padding: 1rem;
-    margin-bottom: 0.5rem;
-}
-.metric-row { display: flex; justify-content: space-between; align-items: center; }
-.ticker-name { font-size: 1.5rem; font-weight: 700; }
-.ticker-sector { font-size: 0.8rem; color: #94a3b8; }
 h1 { font-family: 'Georgia', serif; }
 .macro-card {
     background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);
-    border-radius: 12px;
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-    border-left: 4px solid #818cf8;
+    border-radius: 12px; padding: 1.5rem; margin-bottom: 0.5rem;
+    border-left: 4px solid #818cf8; color: #e0e7ff;
 }
 .warning-card {
-    background: #422006;
-    border: 1px solid #ca8a04;
-    border-radius: 8px;
-    padding: 0.75rem;
-    margin: 0.5rem 0;
-    color: #fde68a;
+    background: #422006; border: 1px solid #ca8a04; border-radius: 8px;
+    padding: 0.75rem; margin: 0.5rem 0; color: #fde68a;
 }
 .calm-mode-empty { text-align: center; padding: 3rem; color: #94a3b8; }
+.headline-row {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 8px 0; border-bottom: 1px solid #f1f5f9;
+}
+.headline-row:last-child { border-bottom: none; }
+.impact-cell { flex-shrink: 0; min-width: 90px; padding-top: 2px; }
+.headline-cell { flex: 1; }
+.headline-title { font-weight: 500; line-height: 1.4; }
+.headline-why {
+    font-size: 0.85em; color: #64748b;
+    font-style: italic; margin-top: 2px;
+}
+.macro-affected {
+    background: #f0fdf4; border-radius: 6px; padding: 8px 12px;
+    margin: 4px 0; font-size: 0.9em; color: #166534;
+}
+.macro-affected.bad { background: #fef2f2; color: #991b1b; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -488,12 +548,11 @@ st.caption(f"News triage + AI sentiment · {datetime.now().strftime('%a %b %d, %
 # Top controls
 col_a, col_b, col_c, col_d = st.columns([1.5, 1.5, 2, 2])
 with col_a:
-    calm_mode = st.toggle("🧘 Calm Mode", value=False, help="Hide noise. Show only items needing attention.")
+    calm_mode = st.toggle("🧘 Calm Mode", value=False)
 with col_b:
     refresh = st.button("🔄 Refresh", use_container_width=True)
 with col_c:
-    open_positions = st.text_input("📌 Open positions (comma-separated tickers)", "",
-                                   placeholder="e.g. NVDA, F").upper()
+    open_positions = st.text_input("📌 Open positions", "", placeholder="e.g. NVDA, F").upper()
 with col_d:
     ai_status = "✅ AI: Groq Llama-3.3" if get_groq_client() else "⚠️ AI: Off (using keywords)"
     st.markdown(f"<div style='padding-top:0.5rem;'>{ai_status}</div>", unsafe_allow_html=True)
@@ -514,10 +573,7 @@ if overview:
     cols = st.columns(len(overview))
     for col, (label, data) in zip(cols, overview.items()):
         col.metric(label, f"{data['price']:.0f}", f"{data['pct']:+.2f}%")
-else:
-    st.info("Market data loading...")
 
-# VIX warning
 if "VIX" in overview and overview["VIX"]["price"] > 25:
     st.markdown(
         f"<div class='warning-card'>⚠️ <b>VIX is elevated at {overview['VIX']['price']:.1f}</b> "
@@ -526,77 +582,80 @@ if "VIX" in overview and overview["VIX"]["price"] > 25:
     )
 
 # ============================================================================
-# SECTION 2: MACRO BRIEF
+# SECTION 2: MACRO BRIEF + WATCHLIST IMPACT
 # ============================================================================
 
 st.markdown("### 📰 Macro Brief")
 macro_news = fetch_macro_news()
-macro_headlines = [n["title"] for n in macro_news[:8]]
-brief = ai_macro_brief(macro_headlines)
+macro_headlines = [n["title"] for n in macro_news[:10]]
+macro_result = ai_macro_brief(macro_headlines, list(WATCHLIST.keys()))
 
-with st.container():
-    if brief:
-        st.markdown(f"<div class='macro-card'>{brief}</div>", unsafe_allow_html=True)
-    elif macro_headlines:
-        st.markdown("<div class='macro-card'>" +
-                    "<br>".join(f"• {h}" for h in macro_headlines[:5]) +
-                    "</div>", unsafe_allow_html=True)
-    else:
-        st.info("No macro news loaded.")
+if macro_result.get("brief"):
+    st.markdown(f"<div class='macro-card'>{macro_result['brief']}</div>", unsafe_allow_html=True)
+    if macro_result.get("winners"):
+        st.markdown(
+            f"<div class='macro-affected'>🟢 <b>Likely winners on your watchlist:</b> "
+            f"{', '.join(macro_result['winners'])} — <i>{macro_result.get('winner_reason','')}</i></div>",
+            unsafe_allow_html=True
+        )
+    if macro_result.get("losers"):
+        st.markdown(
+            f"<div class='macro-affected bad'>🔴 <b>Likely losers on your watchlist:</b> "
+            f"{', '.join(macro_result['losers'])} — <i>{macro_result.get('loser_reason','')}</i></div>",
+            unsafe_allow_html=True
+        )
+elif macro_headlines:
+    st.markdown("<div class='macro-card'>" +
+                "<br>".join(f"• {h}" for h in macro_headlines[:5]) + "</div>",
+                unsafe_allow_html=True)
 
 with st.expander("📃 See all macro headlines"):
     for n in macro_news:
         st.markdown(f"- **[{n.get('category','?').upper()}]** [{n['title']}]({n['link']})")
 
 # ============================================================================
-# SECTION 3: WATCHLIST ANALYSIS
+# SECTION 3: WATCHLIST
 # ============================================================================
 
 st.markdown("### 📈 Watchlist")
+st.caption("Each headline tagged GOOD / BAD / NEUTRAL with reasoning. Click any stock to expand.")
 
-# Determine display order: open positions first, then high priority swing, then others
 def sort_key(t: str) -> tuple:
     in_pos = t in open_pos_set
+    is_winner = t in (macro_result.get("winners") or [])
+    is_loser = t in (macro_result.get("losers") or [])
+    macro_relevant = is_winner or is_loser
     priority_rank = {"high": 0, "med": 1, "low": 2}.get(WATCHLIST[t]["priority"], 3)
     type_rank = 0 if WATCHLIST[t]["type"] == "swing" else 1
-    return (not in_pos, type_rank, priority_rank, t)
+    return (not in_pos, not macro_relevant, type_rank, priority_rank, t)
 
 ordered_tickers = sorted(WATCHLIST.keys(), key=sort_key)
 
-# Build analyses
+
 @st.cache_data(ttl=900, show_spinner=False)
 def build_stock_card_data(ticker: str) -> dict:
     meta = WATCHLIST[ticker]
     price = fetch_price_data(ticker)
-
     yh_news = fetch_news_yahoo(ticker)
     if len(yh_news) < 3:
         gn_news = fetch_news_google(ticker, meta["name"])
-        # de-dupe by title prefix
         seen = {n["title"][:50] for n in yh_news}
         for n in gn_news:
             if n["title"][:50] not in seen:
                 yh_news.append(n)
                 seen.add(n["title"][:50])
-
-    headlines = [n["title"] for n in yh_news[:10]]
-    ai = ai_summarize_stock(ticker, headlines)
+    headlines = [n["title"] for n in yh_news[:8]]
+    ai = ai_analyze_stock(ticker, headlines)
     macros = detect_macro_in_headlines(headlines)
     earnings = fetch_earnings_date(ticker)
-
     return {
-        "meta": meta,
-        "price": price,
-        "news": yh_news[:8],
-        "ai": ai,
-        "macros": macros,
-        "earnings": earnings,
+        "meta": meta, "price": price, "news": yh_news[:8],
+        "ai": ai, "macros": macros, "earnings": earnings,
         "news_count": len(yh_news),
     }
 
 
-# Pre-load with progress (so UI feels responsive)
-with st.spinner("Analyzing watchlist..."):
+with st.spinner("Analyzing watchlist (this takes ~45s on first load — AI is reading every headline)..."):
     cards = {}
     progress = st.progress(0)
     for idx, ticker in enumerate(ordered_tickers):
@@ -605,16 +664,16 @@ with st.spinner("Analyzing watchlist..."):
     progress.empty()
 
 
-# Filter for calm mode
 def show_in_calm(card: dict, ticker: str) -> bool:
-    """In calm mode, only show stocks with action != IGNORE, or with earnings soon, or open positions."""
     if ticker in open_pos_set:
         return True
     if card["ai"]["action"] in ("INVESTIGATE", "WATCH") and card["ai"]["sentiment"] != "NEUTRAL":
         return True
     if card["earnings"]:
         return True
-    if card["news_count"] >= 8:  # high news velocity
+    if card["news_count"] >= 8:
+        return True
+    if ticker in (macro_result.get("winners") or []) or ticker in (macro_result.get("losers") or []):
         return True
     return False
 
@@ -625,27 +684,22 @@ if calm_mode and not visible_tickers:
     st.markdown(
         "<div class='calm-mode-empty'>"
         "<h3>🧘 Nothing urgent today</h3>"
-        "<p>No watchlist stock has news that needs your attention right now.<br>"
-        "<i>The best trade is often no trade.</i></p>"
-        "</div>",
+        "<p>No watchlist stock has news that needs your attention.<br>"
+        "<i>The best trade is often no trade.</i></p></div>",
         unsafe_allow_html=True,
     )
 
-# Correlation warning
+# Correlation warnings
 if len(open_pos_set) >= 2:
-    triggered = []
-    for a, b in CORRELATED_PAIRS:
-        if a in open_pos_set and b in open_pos_set:
-            triggered.append((a, b))
-    if triggered:
-        for a, b in triggered:
-            st.markdown(
-                f"<div class='warning-card'>⚠️ <b>Correlated positions:</b> "
-                f"{a} and {b} move together. You're doubling your bet — consider closing one.</div>",
-                unsafe_allow_html=True,
-            )
+    triggered = [(a, b) for a, b in CORRELATED_PAIRS if a in open_pos_set and b in open_pos_set]
+    for a, b in triggered:
+        st.markdown(
+            f"<div class='warning-card'>⚠️ <b>Correlated positions:</b> "
+            f"{a} and {b} move together. You're doubling your bet — consider closing one.</div>",
+            unsafe_allow_html=True,
+        )
 
-# Render stock cards
+# Render cards
 for ticker in visible_tickers:
     card = cards[ticker]
     meta = card["meta"]
@@ -657,15 +711,20 @@ for ticker in visible_tickers:
         continue
 
     is_open = ticker in open_pos_set
-    border_color = "#818cf8" if is_open else "#1e293b"
+    is_macro_winner = ticker in (macro_result.get("winners") or [])
+    is_macro_loser = ticker in (macro_result.get("losers") or [])
 
     with st.container(border=True):
-        # HEADER ROW
         c1, c2, c3, c4, c5 = st.columns([2, 1.2, 1.2, 1.5, 2])
 
         with c1:
             pin = "📌 " if is_open else ""
-            st.markdown(f"**{pin}{ticker}** · {meta['name']}")
+            macro_tag = ""
+            if is_macro_winner:
+                macro_tag = " <span style='background:#dcfce7;color:#15803d;padding:1px 6px;border-radius:4px;font-size:0.75em'>MACRO WIN</span>"
+            elif is_macro_loser:
+                macro_tag = " <span style='background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:4px;font-size:0.75em'>MACRO LOSS</span>"
+            st.markdown(f"**{pin}{ticker}** · {meta['name']}{macro_tag}", unsafe_allow_html=True)
             st.caption(f"{meta['sector']} · {meta['type']}")
 
         with c2:
@@ -686,36 +745,55 @@ for ticker in visible_tickers:
             if card["earnings"]:
                 badges.append(f"🚫 Earnings {card['earnings']}")
             if card["news_count"] >= 8:
-                badges.append("⚡ High news volume")
+                badges.append("⚡ High news vol")
             for m in card["macros"]:
                 badges.append(f"🌐 {m}")
             if badges:
                 st.caption(" · ".join(badges))
 
-        # AI SUMMARY
-        if ai["summary"]:
+        # Real summary with reasoning
+        if ai.get("summary"):
             st.markdown(f"💬 _{ai['summary']}_")
 
-        # EXPANDED VIEW
-        with st.expander(f"📃 News & details for {ticker}"):
-            cc1, cc2 = st.columns([2, 1])
+        # PER-HEADLINE BREAKDOWN - the new feature you asked for
+        with st.expander(f"📃 Headlines with AI verdict for {ticker} ({card['news_count']} items)"):
+            cc1, cc2 = st.columns([3, 1.2])
             with cc1:
-                st.markdown(f"**Headlines ({card['news_count']}):**")
-                for n in card["news"]:
-                    if n["link"]:
-                        st.markdown(f"- [{n['title']}]({n['link']}) · _{n['publisher']}_")
-                    else:
-                        st.markdown(f"- {n['title']} · _{n['publisher']}_")
+                if ai.get("headline_analysis"):
+                    url_map = {n["title"]: n.get("link", "") for n in card["news"]}
+                    pub_map = {n["title"]: n.get("publisher", "") for n in card["news"]}
+                    for item in ai["headline_analysis"]:
+                        h = item["headline"]
+                        url = url_map.get(h, "")
+                        pub = pub_map.get(h, "")
+                        title_html = f"<a href='{url}' target='_blank'>{h}</a>" if url else h
+                        why = item.get("why", "")
+                        st.markdown(
+                            f"<div class='headline-row'>"
+                            f"<div class='impact-cell'>{impact_badge(item['impact'])}</div>"
+                            f"<div class='headline-cell'>"
+                            f"<div class='headline-title'>{title_html}</div>"
+                            f"<div class='headline-why'>→ {why} <span style='color:#94a3b8'>· {pub}</span></div>"
+                            f"</div></div>",
+                            unsafe_allow_html=True
+                        )
+                else:
+                    for n in card["news"]:
+                        if n["link"]:
+                            st.markdown(f"- [{n['title']}]({n['link']}) · _{n['publisher']}_")
+                        else:
+                            st.markdown(f"- {n['title']} · _{n['publisher']}_")
+
             with cc2:
                 st.markdown("**Technicals:**")
                 st.markdown(f"- 50d trend: {'📈 Above' if price['above_ma50'] else '📉 Below'}")
-                st.markdown(f"- RSI: {price['rsi']:.0f} "
-                            f"{'(oversold)' if price['rsi']<30 else '(overbought)' if price['rsi']>70 else ''}")
+                rsi_label = ('(oversold)' if price['rsi'] < 30
+                             else '(overbought)' if price['rsi'] > 70 else '')
+                st.markdown(f"- RSI: {price['rsi']:.0f} {rsi_label}")
                 st.markdown(f"- 52w high: ${price['hi_52w']:.2f} ({price['pct_from_hi']:+.1f}%)")
                 st.markdown(f"- Avg daily range: {price['avg_daily_range']:.1f}%")
-                st.markdown(f"- AI source: `{ai['source']}`")
+                st.caption(f"AI source: `{ai['source']}`")
 
-                # Mini chart
                 if "history" in price and not price["history"].empty:
                     fig = go.Figure(data=[go.Candlestick(
                         x=price["history"].index[-30:],
@@ -739,7 +817,7 @@ for ticker in visible_tickers:
 
 st.markdown("---")
 st.markdown("### 🤖 Ask the AI")
-st.caption("Ask anything about today's news, your watchlist, or a specific stock.")
+st.caption("Ask about today's news, your watchlist, or any specific stock.")
 
 user_q = st.text_input(
     "Your question",
@@ -752,7 +830,6 @@ if user_q:
     if not client:
         st.warning("AI is not configured. Set GROQ_API_KEY in Streamlit secrets.")
     else:
-        # Build context from current cards
         context_lines = ["Today's watchlist analysis:"]
         for t, card in cards.items():
             ai = card["ai"]
@@ -762,15 +839,15 @@ if user_q:
             )
         if open_pos_set:
             context_lines.append(f"\nUser holds open positions in: {', '.join(open_pos_set)}")
-        if brief:
-            context_lines.append(f"\nMacro brief: {brief}")
+        if macro_result.get("brief"):
+            context_lines.append(f"\nMacro brief: {macro_result['brief']}")
         context = "\n".join(context_lines)
 
         full_prompt = f"""{context}
 
 User question: {user_q}
 
-Answer in 4 sentences max. Be direct, honest, and specific. If you don't know, say so. Don't give generic financial advice — give specific reasoning based on the watchlist data above. End with one concrete suggestion if appropriate."""
+Answer in 4 sentences max. Be direct, honest, specific. Reference the watchlist data above. End with one concrete suggestion if relevant. No generic financial advice fluff."""
         try:
             with st.spinner("Thinking..."):
                 response = client.chat.completions.create(
