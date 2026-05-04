@@ -306,7 +306,7 @@ def _fallback_sentiment(headlines: list[str], error: str = "") -> dict:
     }
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)  # 15 min cache
 def ai_macro_brief(macro_news: list[str], watchlist_tickers: list[str]) -> dict:
     """Macro brief + identifies which watchlist stocks are affected."""
     client = get_groq_client()
@@ -545,29 +545,155 @@ def fetch_news_google(ticker: str, name: str) -> list[dict]:
         return []
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)  # 15 min cache (was 30)
 def fetch_macro_news() -> list[dict]:
-    queries = [
-        "federal+reserve+interest+rate",
-        "ukraine+russia+war",
-        "china+tariffs+trade",
-        "inflation+cpi+economy",
-    ]
+    """
+    Pull macro/geopolitical news from multiple sources.
+    - Google News with 'when:1d' filter (last 24 hours only)
+    - Reuters business RSS
+    - MarketWatch Top Stories RSS
+    - CNBC top news RSS
+    All items get timestamped, sorted newest-first, filtered to last 48h.
+    """
     all_items = []
-    for q in queries:
+    now = datetime.now()
+
+    # ━━━ Google News searches with when:1d (last 24h) ━━━
+    google_queries = [
+        ("fed",     "federal+reserve+interest+rate+when:1d"),
+        ("war",     "ukraine+russia+israel+war+when:1d"),
+        ("tariffs", "china+tariffs+trade+sanctions+when:1d"),
+        ("macro",   "inflation+cpi+jobs+economy+when:1d"),
+        ("market",  "stock+market+sp500+nasdaq+when:1d"),
+    ]
+    for category, q in google_queries:
         try:
             url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
             feed = feedparser.parse(url)
-            for entry in feed.entries[:3]:
+            for entry in feed.entries[:5]:
+                pub_raw = entry.get("published", "")
+                pub_dt = _parse_news_timestamp(pub_raw)
+                # Skip if older than 48h or unparseable+from old source
+                if pub_dt and (now - pub_dt).total_seconds() > 172800:  # 48h
+                    continue
                 all_items.append({
                     "title": entry.get("title", ""),
-                    "publisher": entry.get("source", {}).get("title", ""),
+                    "publisher": entry.get("source", {}).get("title", "Google News"),
                     "link": entry.get("link", ""),
-                    "category": q.split("+")[0],
+                    "category": category,
+                    "pub_dt": pub_dt,
+                    "age_str": _format_age(pub_dt),
+                    "source": "google",
                 })
         except Exception:
             continue
-    return all_items
+
+    # ━━━ Yahoo Finance Top Stories RSS (reliable, official) ━━━
+    try:
+        feed = feedparser.parse("https://finance.yahoo.com/news/rssindex")
+        for entry in feed.entries[:10]:
+            pub_dt = _parse_news_timestamp(entry.get("published", ""))
+            if pub_dt and (now - pub_dt).total_seconds() > 172800:
+                continue
+            title = entry.get("title", "")
+            tl = title.lower()
+            if any(k in tl for k in ["fed", "powell", "fomc", "rate"]):
+                cat = "fed"
+            elif any(k in tl for k in ["ukraine", "russia", "israel", "war", "iran"]):
+                cat = "war"
+            elif any(k in tl for k in ["tariff", "china", "trade war"]):
+                cat = "tariffs"
+            elif any(k in tl for k in ["inflation", "cpi", "jobs", "gdp", "recession"]):
+                cat = "macro"
+            else:
+                cat = "market"
+            all_items.append({
+                "title": title,
+                "publisher": "Yahoo Finance",
+                "link": entry.get("link", ""),
+                "category": cat,
+                "pub_dt": pub_dt,
+                "age_str": _format_age(pub_dt),
+                "source": "yahoo",
+            })
+    except Exception:
+        pass
+
+    # ━━━ MarketWatch Top Stories ━━━
+    try:
+        feed = feedparser.parse("https://feeds.content.dowjones.io/public/rss/mw_topstories")
+        for entry in feed.entries[:8]:
+            pub_dt = _parse_news_timestamp(entry.get("published", ""))
+            if pub_dt and (now - pub_dt).total_seconds() > 172800:
+                continue
+            title = entry.get("title", "")
+            tl = title.lower()
+            if any(k in tl for k in ["fed", "powell", "rate"]):
+                cat = "fed"
+            elif any(k in tl for k in ["ukraine", "russia", "israel", "war"]):
+                cat = "war"
+            elif any(k in tl for k in ["tariff", "china"]):
+                cat = "tariffs"
+            elif any(k in tl for k in ["inflation", "cpi", "jobs"]):
+                cat = "macro"
+            else:
+                cat = "market"
+            all_items.append({
+                "title": title,
+                "publisher": "MarketWatch",
+                "link": entry.get("link", ""),
+                "category": cat,
+                "pub_dt": pub_dt,
+                "age_str": _format_age(pub_dt),
+                "source": "marketwatch",
+            })
+    except Exception:
+        pass
+
+    # ━━━ CNBC Top News ━━━
+    try:
+        feed = feedparser.parse("https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114")
+        for entry in feed.entries[:6]:
+            pub_dt = _parse_news_timestamp(entry.get("published", ""))
+            if pub_dt and (now - pub_dt).total_seconds() > 172800:
+                continue
+            title = entry.get("title", "")
+            tl = title.lower()
+            if any(k in tl for k in ["fed", "powell", "rate"]):
+                cat = "fed"
+            elif any(k in tl for k in ["war", "ukraine", "israel"]):
+                cat = "war"
+            elif any(k in tl for k in ["tariff", "china"]):
+                cat = "tariffs"
+            elif any(k in tl for k in ["inflation", "cpi", "jobs"]):
+                cat = "macro"
+            else:
+                cat = "market"
+            all_items.append({
+                "title": title,
+                "publisher": "CNBC",
+                "link": entry.get("link", ""),
+                "category": cat,
+                "pub_dt": pub_dt,
+                "age_str": _format_age(pub_dt),
+                "source": "cnbc",
+            })
+    except Exception:
+        pass
+
+    # Deduplicate by title (case-insensitive first 60 chars)
+    seen = set()
+    deduped = []
+    for item in all_items:
+        key = item["title"][:60].lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(item)
+
+    # Sort newest first (items with no timestamp go to bottom)
+    deduped.sort(key=lambda n: -(n["pub_dt"].timestamp() if n["pub_dt"] else 0))
+
+    return deduped[:25]  # cap at 25 macro headlines
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -918,11 +1044,75 @@ with col_d:
     ai_status = "✅ AI: Groq Llama-3.3" if get_groq_client() else "⚠️ AI: Off (using keywords)"
     st.markdown(f"<div style='padding-top:0.5rem;'>{ai_status}</div>", unsafe_allow_html=True)
 
+# ━━━ Custom ticker input ━━━
+if "custom_tickers" not in st.session_state:
+    st.session_state.custom_tickers = {}
+
+ct_col1, ct_col2, ct_col3 = st.columns([2, 1, 3])
+with ct_col1:
+    new_ticker = st.text_input(
+        "➕ Add custom stock to watchlist (this session only)",
+        "",
+        placeholder="e.g. GOOGL, META, ORCL",
+        help="Add any US ticker. Persists for this session. Clears on browser refresh."
+    ).upper().strip()
+with ct_col2:
+    add_clicked = st.button("➕ Add", use_container_width=True)
+with ct_col3:
+    if st.session_state.custom_tickers:
+        custom_list = ", ".join(st.session_state.custom_tickers.keys())
+        st.markdown(
+            f"<div style='padding-top:0.5rem; font-size:0.85em; color:#64748b;'>"
+            f"Custom: <span style='color:#0891b2; font-weight:600;'>{custom_list}</span> "
+            f"<a href='?clear_custom=1' style='color:#dc2626; font-size:0.85em;'>(clear all)</a>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+# Handle clear custom tickers via URL param
+if st.query_params.get("clear_custom"):
+    st.session_state.custom_tickers = {}
+    st.query_params.clear()
+    st.rerun()
+
+# Handle adding new ticker
+if add_clicked and new_ticker:
+    # Validate by trying to fetch price (lightweight check)
+    if new_ticker in WATCHLIST or new_ticker in st.session_state.custom_tickers:
+        st.warning(f"{new_ticker} is already in your watchlist.")
+    elif not new_ticker.replace("-", "").replace(".", "").isalnum():
+        st.error(f"Invalid ticker format: {new_ticker}")
+    else:
+        # Quick validation: try to fetch one day of data
+        try:
+            test = yf.Ticker(new_ticker)
+            test_hist = test.history(period="5d")
+            if test_hist.empty:
+                st.error(f"Could not find ticker {new_ticker}. Check spelling.")
+            else:
+                # Get company name from yfinance info
+                info = test.info if hasattr(test, "info") else {}
+                name = info.get("shortName", new_ticker) or info.get("longName", new_ticker) or new_ticker
+                sector = info.get("sector", "Custom")
+                st.session_state.custom_tickers[new_ticker] = {
+                    "name": str(name)[:30],
+                    "sector": str(sector)[:20],
+                    "type": "swing",
+                    "priority": "high",  # custom adds get high priority so they show up
+                }
+                st.success(f"✅ Added {new_ticker} ({name})")
+                st.rerun()
+        except Exception as e:
+            st.error(f"Error adding {new_ticker}: {str(e)[:100]}")
+
 if refresh:
     st.cache_data.clear()
     st.rerun()
 
 open_pos_set = {t.strip() for t in open_positions.split(",") if t.strip()}
+
+# Merge custom tickers into the active watchlist for this session
+ACTIVE_WATCHLIST = {**WATCHLIST, **st.session_state.custom_tickers}
 
 # ============================================================================
 # SECTION 1: MARKET OVERVIEW
@@ -948,8 +1138,35 @@ if "VIX" in overview and overview["VIX"]["price"] > 25:
 
 st.markdown("### 📰 Macro Brief")
 macro_news = fetch_macro_news()
-macro_headlines = [n["title"] for n in macro_news[:10]]
-macro_result = ai_macro_brief(macro_headlines, list(WATCHLIST.keys()))
+
+# Compute freshness indicator: how recent is the freshest item?
+fresh_count_24h = sum(1 for n in macro_news
+                     if n.get("pub_dt") and (datetime.now() - n["pub_dt"]).total_seconds() < 86400)
+fresh_count_6h = sum(1 for n in macro_news
+                    if n.get("pub_dt") and (datetime.now() - n["pub_dt"]).total_seconds() < 21600)
+
+# Show freshness indicator at top
+freshness_color = "#10b981" if fresh_count_6h >= 5 else "#f59e0b" if fresh_count_24h >= 5 else "#ef4444"
+freshness_label = ("✅ Fresh" if fresh_count_6h >= 5
+                   else "⚠️ Mixed" if fresh_count_24h >= 5
+                   else "🔴 Stale")
+st.markdown(
+    f"<div style='display:flex; gap:12px; flex-wrap:wrap; font-size:0.85em; color:#64748b; margin-bottom:8px;'>"
+    f"<span style='color:{freshness_color}; font-weight:600;'>{freshness_label}</span>"
+    f"<span>· {fresh_count_6h} fresh (last 6h)</span>"
+    f"<span>· {fresh_count_24h} recent (last 24h)</span>"
+    f"<span>· {len(macro_news)} total items</span>"
+    f"<span>· Updated: {datetime.now().strftime('%H:%M')}</span>"
+    f"</div>",
+    unsafe_allow_html=True
+)
+
+# Pass headlines with age tags to AI for better recency weighting
+macro_headlines_with_age = []
+for n in macro_news[:12]:
+    age = n.get("age_str", "?")
+    macro_headlines_with_age.append(f"[{age}] {n['title']}")
+macro_result = ai_macro_brief(macro_headlines_with_age, list(ACTIVE_WATCHLIST.keys()))
 
 if macro_result.get("brief"):
     st.markdown(f"<div class='macro-card'>{macro_result['brief']}</div>", unsafe_allow_html=True)
@@ -965,14 +1182,41 @@ if macro_result.get("brief"):
             f"{', '.join(macro_result['losers'])} — <i>{macro_result.get('loser_reason','')}</i></div>",
             unsafe_allow_html=True
         )
-elif macro_headlines:
+elif macro_news:
     st.markdown("<div class='macro-card'>" +
-                "<br>".join(f"• {h}" for h in macro_headlines[:5]) + "</div>",
+                "<br>".join(f"• {n['title']}" for n in macro_news[:5]) + "</div>",
                 unsafe_allow_html=True)
 
-with st.expander("📃 See all macro headlines"):
+with st.expander(f"📃 See all macro headlines ({len(macro_news)} items, sorted newest first)"):
+    if not macro_news:
+        st.info("No macro news available right now. Try refreshing.")
     for n in macro_news:
-        st.markdown(f"- **[{n.get('category','?').upper()}]** [{n['title']}]({n['link']})")
+        age = n.get("age_str", "?")
+        cat = n.get("category", "?").upper()
+        publisher = n.get("publisher", "")
+        # Color-code age
+        age_color = "#15803d" if "h ago" in age and "h ago" in age else "#64748b"
+        if "m ago" in age:
+            age_color = "#15803d"
+        elif "h ago" in age:
+            try:
+                hours = int(age.split("h")[0])
+                age_color = "#15803d" if hours < 6 else "#0891b2" if hours < 24 else "#94a3b8"
+            except (ValueError, IndexError):
+                age_color = "#64748b"
+        else:
+            age_color = "#94a3b8"
+
+        st.markdown(
+            f"<div style='padding:6px 0; border-bottom:1px solid #f1f5f9;'>"
+            f"<span style='background:#e0e7ff; color:#3730a3; padding:1px 6px; border-radius:3px; "
+            f"font-size:0.7em; font-weight:600; margin-right:6px;'>{cat}</span>"
+            f"<a href='{n['link']}' target='_blank' style='color:#1e40af;'>{n['title']}</a>"
+            f"<div style='font-size:0.78em; color:#94a3b8; margin-top:2px;'>"
+            f"{publisher} · <span style='color:{age_color}; font-weight:600;'>🕐 {age}</span>"
+            f"</div></div>",
+            unsafe_allow_html=True
+        )
 
 # ============================================================================
 # SECTION 3: WATCHLIST
@@ -986,16 +1230,18 @@ def sort_key(t: str) -> tuple:
     is_winner = t in (macro_result.get("winners") or [])
     is_loser = t in (macro_result.get("losers") or [])
     macro_relevant = is_winner or is_loser
-    priority_rank = {"high": 0, "med": 1, "low": 2}.get(WATCHLIST[t]["priority"], 3)
-    type_rank = 0 if WATCHLIST[t]["type"] == "swing" else 1
+    priority_rank = {"high": 0, "med": 1, "low": 2}.get(ACTIVE_WATCHLIST[t]["priority"], 3)
+    type_rank = 0 if ACTIVE_WATCHLIST[t]["type"] == "swing" else 1
     return (not in_pos, not macro_relevant, type_rank, priority_rank, t)
 
-ordered_tickers = sorted(WATCHLIST.keys(), key=sort_key)
+ordered_tickers = sorted(ACTIVE_WATCHLIST.keys(), key=sort_key)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def build_stock_card_data(ticker: str) -> dict:
-    meta = WATCHLIST[ticker]
+def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "",
+                           meta_type: str = "swing", meta_priority: str = "med") -> dict:
+    """Build all card data for a ticker. Meta passed explicitly to support custom tickers."""
+    meta = {"name": meta_name or ticker, "sector": meta_sector, "type": meta_type, "priority": meta_priority}
     price = fetch_price_data(ticker)
 
     # Pull both sources and merge
@@ -1059,7 +1305,14 @@ with st.spinner("Analyzing watchlist (this takes ~45s on first load — AI is re
     cards = {}
     progress = st.progress(0)
     for idx, ticker in enumerate(ordered_tickers):
-        cards[ticker] = build_stock_card_data(ticker)
+        m = ACTIVE_WATCHLIST[ticker]
+        cards[ticker] = build_stock_card_data(
+            ticker,
+            meta_name=m.get("name", ticker),
+            meta_sector=m.get("sector", ""),
+            meta_type=m.get("type", "swing"),
+            meta_priority=m.get("priority", "med"),
+        )
         progress.progress((idx + 1) / len(ordered_tickers))
     progress.empty()
 
@@ -1082,7 +1335,7 @@ if top_dips:
     st.markdown("#### 🎯 Top Dip-Buy Candidates Right Now")
     cols = st.columns(min(len(top_dips), 5))
     for col, (ticker, dip) in zip(cols, top_dips):
-        meta = WATCHLIST[ticker]
+        meta = ACTIVE_WATCHLIST[ticker]
         price = cards[ticker]["price"]
         d_color = dip["color"]
         d_score = dip["score"]
@@ -1123,6 +1376,71 @@ def show_in_calm(card: dict, ticker: str) -> bool:
 
 visible_tickers = [t for t in ordered_tickers if (not calm_mode or show_in_calm(cards[t], t))]
 
+# ━━━ STOCK NAVIGATION SLIDER ━━━
+# Color-coded ticker badges that anchor-link to each stock's card below
+if visible_tickers:
+    nav_html = "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:8px 10px; margin-bottom:14px;'>"
+    nav_html += "<div style='font-size:0.7em; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; font-weight:600; margin-bottom:6px;'>"
+    nav_html += "🎯 Quick jump (click any ticker to jump to its card)"
+    nav_html += "</div>"
+    nav_html += "<div style='display:flex; flex-wrap:wrap; gap:6px;'>"
+    for t in visible_tickers:
+        card = cards[t]
+        ai = card["ai"]
+        dip = dip_scores.get(t, {"score": 0, "color": "#94a3b8"})
+        # Determine badge color
+        is_open = t in open_pos_set
+        is_winner = t in (macro_result.get("winners") or [])
+        is_loser = t in (macro_result.get("losers") or [])
+        if is_open:
+            border = "#3b82f6"; bg = "#dbeafe"; fg = "#1e40af"
+        elif dip["score"] >= 65:
+            border = "#10b981"; bg = "#dcfce7"; fg = "#166534"
+        elif is_winner:
+            border = "#10b981"; bg = "#ecfdf5"; fg = "#047857"
+        elif is_loser:
+            border = "#ef4444"; bg = "#fee2e2"; fg = "#991b1b"
+        elif dip["score"] >= 45:
+            border = "#f59e0b"; bg = "#fef3c7"; fg = "#92400e"
+        elif ai["action"] == "INVESTIGATE":
+            border = "#a855f7"; bg = "#f3e8ff"; fg = "#6b21a8"
+        else:
+            border = "#cbd5e1"; bg = "white"; fg = "#475569"
+
+        # Tiny indicator
+        indicator = ""
+        if is_open:
+            indicator = " 📌"
+        elif card["earnings"]:
+            indicator = " 🚫"
+        elif card.get("recent_24h", 0) >= 3:
+            indicator = " 🔥"
+        elif dip["score"] >= 65:
+            indicator = " 🟢"
+
+        nav_html += (
+            f"<a href='#stock-{t.replace('-','_')}' "
+            f"style='display:inline-block; padding:4px 10px; border-radius:6px; "
+            f"background:{bg}; color:{fg}; border:1px solid {border}; "
+            f"font-size:0.85em; font-weight:700; text-decoration:none; "
+            f"letter-spacing:0.3px; transition:all 0.15s;'>"
+            f"{t}{indicator}"
+            f"</a>"
+        )
+    nav_html += "</div>"
+
+    # Legend
+    nav_html += (
+        "<div style='font-size:0.7em; color:#94a3b8; margin-top:8px; display:flex; gap:14px; flex-wrap:wrap;'>"
+        "<span>📌 your open position</span>"
+        "<span>🟢 strong dip-buy</span>"
+        "<span>🔥 fresh news</span>"
+        "<span>🚫 earnings soon</span>"
+        "</div>"
+    )
+    nav_html += "</div>"
+    st.markdown(nav_html, unsafe_allow_html=True)
+
 if calm_mode and not visible_tickers:
     st.markdown(
         "<div class='calm-mode-empty'>"
@@ -1152,6 +1470,11 @@ for ticker in visible_tickers:
     if price.get("error"):
         st.warning(f"{ticker}: {price['error']}")
         continue
+
+    # Anchor target for the navigation slider above
+    anchor_id = f"stock-{ticker.replace('-', '_')}"
+    st.markdown(f"<div id='{anchor_id}' style='scroll-margin-top:80px;'></div>",
+                unsafe_allow_html=True)
 
     is_open = ticker in open_pos_set
     is_macro_winner = ticker in (macro_result.get("winners") or [])
