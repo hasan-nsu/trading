@@ -28,6 +28,19 @@ import feedparser
 import plotly.graph_objects as go
 from groq import Groq
 
+# Optional dependencies — graceful fallback if not installed
+try:
+    import trafilatura
+    TRAFILATURA_AVAILABLE = True
+except ImportError:
+    TRAFILATURA_AVAILABLE = False
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
 # ============================================================================
 # CONFIG
 # ============================================================================
@@ -482,6 +495,178 @@ def _relevance_score(title: str, ticker: str, company: str) -> str:
 
     # MEDIUM: probably sector/competitor relevant
     return "MEDIUM"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ARTICLE CONTENT EXTRACTION (full-text fetching)
+# ════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=86400, show_spinner=False)  # cache for 24 hours
+def extract_article_text(url: str, max_chars: int = 2000) -> str:
+    """
+    Fetch and extract clean article text from a URL using trafilatura.
+    Returns truncated plain text (max_chars) suitable for AI summarization.
+    Returns empty string if unavailable or extraction fails.
+    """
+    if not TRAFILATURA_AVAILABLE or not url:
+        return ""
+
+    try:
+        # trafilatura.fetch_url has built-in retry, timeout, and proper UA
+        downloaded = trafilatura.fetch_url(url, no_ssl=True)
+        if not downloaded:
+            return ""
+        # Extract main article text only (no nav, ads, comments)
+        text = trafilatura.extract(
+            downloaded,
+            include_comments=False,
+            include_tables=False,
+            no_fallback=False,
+            favor_precision=True,
+        )
+        if not text:
+            return ""
+        # Clean and truncate
+        text = re.sub(r'\s+', ' ', text).strip()
+        if len(text) > max_chars:
+            text = text[:max_chars].rsplit(' ', 1)[0] + "..."
+        return text
+    except Exception:
+        return ""
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MARKETAUX API (financial news with built-in sentiment)
+# ════════════════════════════════════════════════════════════════════════════
+
+def get_marketaux_key() -> Optional[str]:
+    """Return Marketaux API key from secrets or env, if configured."""
+    key = None
+    try:
+        key = st.secrets.get("MARKETAUX_API_KEY")
+    except Exception:
+        pass
+    if not key:
+        key = os.environ.get("MARKETAUX_API_KEY")
+    return key.strip() if key and key.strip() else None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_news_marketaux(ticker: str) -> list[dict]:
+    """
+    Fetch news from Marketaux API. Returns up to 10 items with sentiment scores.
+    Free tier: 100 requests/day. Returns empty list if no API key or if errored.
+    """
+    key = get_marketaux_key()
+    if not key or not REQUESTS_AVAILABLE:
+        return []
+
+    try:
+        url = "https://api.marketaux.com/v1/news/all"
+        params = {
+            "symbols": ticker,
+            "filter_entities": "true",
+            "language": "en",
+            "limit": 10,
+            "api_token": key,
+            "published_after": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M"),
+        }
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        items = []
+        for art in data.get("data", []):
+            pub_dt = _parse_news_timestamp(art.get("published_at", ""))
+            # Marketaux sentiment per-entity
+            entity_sent = None
+            for ent in art.get("entities", []):
+                if ent.get("symbol") == ticker:
+                    entity_sent = ent.get("sentiment_score")
+                    break
+            items.append({
+                "title": art.get("title", ""),
+                "publisher": art.get("source", "Marketaux"),
+                "link": art.get("url", ""),
+                "pub_dt": pub_dt,
+                "age_str": _format_age(pub_dt),
+                "relevance": "HIGH",  # Marketaux already filters by ticker
+                "snippet": art.get("description", "")[:500],
+                "marketaux_sentiment": entity_sent,  # -1.0 to +1.0 if available
+            })
+        return items
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_macro_marketaux() -> list[dict]:
+    """Fetch macro/market news from Marketaux trending endpoint."""
+    key = get_marketaux_key()
+    if not key or not REQUESTS_AVAILABLE:
+        return []
+
+    try:
+        url = "https://api.marketaux.com/v1/news/all"
+        params = {
+            "language": "en",
+            "limit": 10,
+            "filter_entities": "false",
+            "api_token": key,
+            "search": "fed OR inflation OR tariff OR economy OR rate",
+            "published_after": (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M"),
+        }
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        items = []
+        for art in data.get("data", []):
+            pub_dt = _parse_news_timestamp(art.get("published_at", ""))
+            title = art.get("title", "")
+            tl = title.lower()
+            if any(k in tl for k in ["fed", "powell", "fomc", "rate"]):
+                cat = "fed"
+            elif any(k in tl for k in ["ukraine", "russia", "israel", "war", "iran"]):
+                cat = "war"
+            elif any(k in tl for k in ["tariff", "china", "trade war"]):
+                cat = "tariffs"
+            elif any(k in tl for k in ["inflation", "cpi", "jobs", "gdp", "recession"]):
+                cat = "macro"
+            else:
+                cat = "market"
+            items.append({
+                "title": title,
+                "publisher": art.get("source", "Marketaux"),
+                "link": art.get("url", ""),
+                "category": cat,
+                "pub_dt": pub_dt,
+                "age_str": _format_age(pub_dt),
+                "source": "marketaux",
+                "snippet": art.get("description", "")[:500],
+            })
+        return items
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_article_summary_for_ai(item: dict, ticker: str) -> str:
+    """
+    Returns the best available text for AI to analyze for a given news item.
+    Priority: Marketaux snippet (already there) > extracted article text > title only.
+    """
+    # If Marketaux already gave us a snippet, use it (no need to fetch)
+    if item.get("snippet"):
+        return item["snippet"]
+    # Otherwise try to extract full article text
+    url = item.get("link", "")
+    if url and TRAFILATURA_AVAILABLE:
+        text = extract_article_text(url, max_chars=1500)
+        if text:
+            return text
+    # Fallback: just the title
+    return item.get("title", "")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1284,12 +1469,13 @@ def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "
     meta = {"name": meta_name or ticker, "sector": meta_sector, "type": meta_type, "priority": meta_priority}
     price = fetch_price_data(ticker)
 
-    # Pull both sources and merge
+    # Pull all available sources and merge (Marketaux first if available — best quality)
+    mx_news = fetch_news_marketaux(ticker)  # empty list if no API key
     yh_news = fetch_news_yahoo(ticker)
     gn_news = fetch_news_google(ticker, meta["name"])
     seen = set()
     combined = []
-    for n in yh_news + gn_news:
+    for n in mx_news + yh_news + gn_news:  # Marketaux first = priority
         key = n["title"][:60].lower()
         if key in seen:
             continue
@@ -1319,13 +1505,29 @@ def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "
     # Take top 8 for display & AI analysis
     final_news = combined[:8]
 
-    # Pass headlines WITH age annotation so AI weights recent news more
-    headlines = []
-    for n in final_news:
+    # ━━ Enhance AI input: include article snippets/content for top 3 items ━━
+    # We don't extract for all 8 because fetching takes 2-3s per article.
+    # Top 3 most relevant + recent get full content; rest get title+age only.
+    headlines_for_ai = []
+    for i, n in enumerate(final_news):
         age = n.get("age_str", "?")
-        headlines.append(f"[{age}] {n['title']}")
+        title = n["title"]
+        if i < 3:
+            # Try to get rich content for top 3
+            content = get_article_summary_for_ai(n, ticker)
+            if content and len(content) > len(title) + 50:
+                # Trim content to ~600 chars to keep prompt size reasonable
+                content_trimmed = content[:600].rsplit(' ', 1)[0]
+                headlines_for_ai.append(
+                    f"[{age}] {title}\n   ARTICLE: {content_trimmed}..."
+                )
+            else:
+                headlines_for_ai.append(f"[{age}] {title}")
+        else:
+            # For items 4-8, just title + age
+            headlines_for_ai.append(f"[{age}] {title}")
 
-    ai = ai_analyze_stock(ticker, headlines)
+    ai = ai_analyze_stock(ticker, headlines_for_ai)
     macros = detect_macro_in_headlines([n["title"] for n in final_news])
     earnings = fetch_earnings_date(ticker)
 
