@@ -49,8 +49,9 @@ with c1:
 with c2:
     height = st.slider(
         "Display height",
-        min_value=400, max_value=2400, value=1000, step=100,
-        help="Adjust if your content is cut off or has empty space below.",
+        min_value=600, max_value=3600, value=2200, step=100,
+        help="Adjust if your content is cut off or has empty space below. "
+             "Long checklists/playbooks often need 2200-2800px.",
     )
 
 selected_file = STATIC_DIR / selected_name
@@ -62,6 +63,15 @@ import datetime as _dt
 modified_str = _dt.datetime.fromtimestamp(modified).strftime("%b %d, %Y · %H:%M")
 
 st.caption(f"📄 `{selected_name}` · {size_kb:.1f} KB · last modified {modified_str}")
+
+# For long HTML files (checklists, playbooks, full-page dashboards),
+# the default height may not be enough. Show a hint above the embed.
+if size_kb > 30 and height < 2000:
+    st.info(
+        f"💡 This file is {size_kb:.0f} KB — large HTML pages need more height. "
+        f"Try sliding **Display height** up to 2200-2800px if content looks cut off."
+    )
+
 st.markdown("---")
 
 # Read + render
