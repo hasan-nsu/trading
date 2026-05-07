@@ -338,7 +338,8 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def ai_analyze_stock(ticker: str, headlines: list[str]) -> dict:
+def ai_analyze_stock(ticker: str, headlines: list[str],
+                     news_items: Optional[list[dict]] = None) -> dict:
     """
     Per-headline impact analysis + overall verdict for a stock.
 
@@ -346,10 +347,14 @@ def ai_analyze_stock(ticker: str, headlines: list[str]) -> dict:
       sentiment, score, summary (with reasoning), action,
       headline_analysis (list of {headline, impact, why}),
       source, error
+
+    news_items (optional): full news dicts that may contain 'marketaux_sentiment'
+      scores. Used by the fallback when AI is unavailable, to give better
+      results than keyword matching.
     """
     pool = get_groq_pool()
     if not pool.has_any_key() or not headlines:
-        return _fallback_sentiment(headlines)
+        return _fallback_sentiment(headlines, news_items=news_items)
 
     company = WATCHLIST.get(ticker, {}).get("name", ticker)
     sector = WATCHLIST.get(ticker, {}).get("sector", "")
@@ -425,11 +430,13 @@ Be honest. Be skeptical. Default to NEUTRAL."""
             response_format={"type": "json_object"},
         )
         if response is None:
-            return _fallback_sentiment(headlines, error="all keys cooled down")
+            return _fallback_sentiment(headlines, error="all keys cooled down",
+                                       news_items=news_items)
         text = response.choices[0].message.content
         parsed = _extract_json(text)
         if not parsed:
-            return _fallback_sentiment(headlines, error="JSON parse failed")
+            return _fallback_sentiment(headlines, error="JSON parse failed",
+                                       news_items=news_items)
 
         per_headline = []
         for item in parsed.get("headlines", []):
@@ -451,11 +458,20 @@ Be honest. Be skeptical. Default to NEUTRAL."""
             "source": "ai",
         }
     except Exception as e:
-        return _fallback_sentiment(headlines, error=str(e))
+        return _fallback_sentiment(headlines, error=str(e), news_items=news_items)
 
 
-def _fallback_sentiment(headlines: list[str], error: str = "") -> dict:
-    """Keyword fallback - now also produces per-headline output."""
+def _fallback_sentiment(headlines: list[str], error: str = "",
+                        news_items: Optional[list[dict]] = None) -> dict:
+    """
+    Fallback when AI is unavailable. Priority order:
+      1. If news_items have Marketaux sentiment scores, use those (good)
+      2. Otherwise, use keyword matching (basic)
+
+    The first path is significantly better than keywords because Marketaux
+    already ran a financial-NLP model on the headline. We just trust their
+    score instead of running our own AI on top.
+    """
     if not headlines:
         return {
             "sentiment": "QUIET", "score": 0.0,
@@ -465,48 +481,116 @@ def _fallback_sentiment(headlines: list[str], error: str = "") -> dict:
             "source": f"fallback{(' (' + error + ')') if error else ''}",
         }
 
+    # Build a lookup: headline → marketaux_sentiment if we have it
+    # Headlines passed to AI are prefixed with "[2h ago] ", we need to match against
+    # raw titles. So index the news_items by their cleaned title.
+    mx_sentiment_lookup: dict[str, float] = {}
+    if news_items:
+        for n in news_items:
+            mx_score = n.get("marketaux_sentiment")
+            if mx_score is not None and isinstance(mx_score, (int, float)):
+                title = n.get("title", "")
+                if title:
+                    mx_sentiment_lookup[title] = float(mx_score)
+
     per_headline = []
     pos_total = neg_total = 0
-    for h in headlines[:8]:
-        words = set(h.lower().split())
-        pos = len(words & POSITIVE_WORDS)
-        neg = len(words & NEGATIVE_WORDS)
-        if pos > neg:
-            impact, why = "GOOD", "Contains positive keywords"
-        elif neg > pos:
-            impact, why = "BAD", "Contains negative keywords"
-        else:
-            impact, why = "NEUTRAL", "No clear sentiment"
-        per_headline.append({"headline": h, "impact": impact, "why": why})
-        pos_total += pos
-        neg_total += neg
+    used_marketaux_count = 0
+    used_keyword_count = 0
 
+    # Strip "[Xh ago] " or "[Xm ago] " prefix that ai_analyze adds before passing
+    prefix_re = re.compile(r"^\[[^\]]+\]\s*")
+
+    for h_with_prefix in headlines[:8]:
+        h_clean = prefix_re.sub("", h_with_prefix).split("\n")[0].strip()
+
+        # Try Marketaux first
+        mx_score = mx_sentiment_lookup.get(h_clean)
+        if mx_score is None:
+            # Try matching against just the title portion (no ARTICLE: chunk)
+            mx_score = mx_sentiment_lookup.get(h_with_prefix.split("\n")[0])
+
+        if mx_score is not None:
+            # Use Marketaux's score directly
+            used_marketaux_count += 1
+            if mx_score > 0.15:
+                impact = "GOOD"
+                why = f"Marketaux sentiment: {mx_score:+.2f} (positive)"
+                pos_total += abs(mx_score)
+            elif mx_score < -0.15:
+                impact = "BAD"
+                why = f"Marketaux sentiment: {mx_score:+.2f} (negative)"
+                neg_total += abs(mx_score)
+            else:
+                impact = "NEUTRAL"
+                why = f"Marketaux sentiment: {mx_score:+.2f} (neutral)"
+            per_headline.append({"headline": h_with_prefix, "impact": impact, "why": why})
+        else:
+            # Keyword fallback for this headline
+            used_keyword_count += 1
+            words = set(h_clean.lower().split())
+            pos = len(words & POSITIVE_WORDS)
+            neg = len(words & NEGATIVE_WORDS)
+            if pos > neg:
+                impact, why = "GOOD", "Contains positive keywords"
+                pos_total += pos
+            elif neg > pos:
+                impact, why = "BAD", "Contains negative keywords"
+                neg_total += neg
+            else:
+                impact, why = "NEUTRAL", "No clear sentiment"
+            per_headline.append({"headline": h_with_prefix, "impact": impact, "why": why})
+
+    # Aggregate score
     total = pos_total + neg_total
     if total == 0:
         sent, score, action = "NEUTRAL", 0.0, "IGNORE"
         summary = "No clear signal in headlines. Routine market noise."
     else:
         score = (pos_total - neg_total) / max(total, 1)
+        # Cap score at +/- 1
+        score = max(-1.0, min(1.0, score))
         if score > 0.3:
             sent, action = "POSITIVE", "WATCH"
-            summary = "Headlines lean positive based on keyword analysis. AI unavailable for deeper analysis."
         elif score < -0.3:
             sent, action = "NEGATIVE", "INVESTIGATE"
-            summary = "Headlines lean negative based on keyword analysis. AI unavailable for deeper analysis."
         else:
             sent, action = "MIXED", "WATCH"
-            summary = "Mixed signals in headlines. AI unavailable for deeper analysis."
 
-    # Build a simple briefing from headlines when AI is unavailable
-    briefing = ("AI is currently unavailable, so this is a keyword-based view: " +
-                " ".join(headlines[:5])[:600] +
+        # Tailor summary based on which method was used
+        if used_marketaux_count >= used_keyword_count and used_marketaux_count > 0:
+            method_note = f"based on Marketaux sentiment scores ({used_marketaux_count} headlines)"
+        elif used_marketaux_count > 0:
+            method_note = (f"based on Marketaux ({used_marketaux_count}) and "
+                           f"keyword analysis ({used_keyword_count})")
+        else:
+            method_note = "based on keyword analysis (Marketaux data unavailable)"
+
+        if sent == "POSITIVE":
+            summary = f"Headlines lean positive {method_note}. AI unavailable for deeper reasoning."
+        elif sent == "NEGATIVE":
+            summary = f"Headlines lean negative {method_note}. AI unavailable for deeper reasoning."
+        else:
+            summary = f"Mixed signals in headlines {method_note}. AI unavailable for deeper reasoning."
+
+    # Build a simple briefing
+    brief_method = ("Using Marketaux sentiment as backup" if used_marketaux_count > used_keyword_count
+                    else "AI is currently unavailable, so this is a keyword-based view")
+    briefing = (f"{brief_method}: " +
+                " ".join([prefix_re.sub("", h).split(chr(10))[0] for h in headlines[:5]])[:600] +
                 " — verify by reading the full headlines below.")
+
+    # Tag the source so the user can see in the cards what method was used
+    if used_marketaux_count > 0 and used_marketaux_count >= used_keyword_count:
+        source_tag = f"marketaux ({used_marketaux_count}/{len(per_headline)} hl)"
+    else:
+        source_tag = f"fallback{(' (' + error + ')') if error else ''}"
 
     return {
         "sentiment": sent, "score": score, "summary": summary,
         "news_briefing": briefing,
         "action": action, "headline_analysis": per_headline,
-        "source": f"fallback{(' (' + error + ')') if error else ''}",
+        "source": source_tag,
     }
 
 
@@ -1134,6 +1218,186 @@ def fetch_earnings_date(ticker: str) -> Optional[str]:
         return None
     except Exception:
         return None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)  # 24h cache (analysts move slowly)
+def fetch_analyst_data(ticker: str) -> dict:
+    """
+    Fetch analyst recommendations + price targets from Yahoo Finance.
+
+    Returns a dict with:
+      - rec_label: human-readable rating ("Strong Buy" / "Buy" / "Hold" / "Sell" / "Strong Sell")
+      - rec_mean: numeric (1.0 = Strong Buy, 5.0 = Strong Sell)
+      - strong_buy / buy / hold / sell / strong_sell: counts (if available)
+      - total_analysts: count of analysts giving recommendations
+      - target_mean / target_high / target_low: price targets in USD
+      - target_count: number of analysts with targets
+      - upside_pct: (target_mean - current_price) / current_price * 100
+      - error: present only if fetch failed
+
+    All fields are optional — Yahoo may not have data for every ticker.
+    """
+    out: dict = {}
+    try:
+        t = yf.Ticker(ticker)
+
+        # ── info dict has price targets and recommendation summary ──
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+
+        # Price target fields
+        if info.get("targetMeanPrice"):
+            try:
+                out["target_mean"] = float(info["targetMeanPrice"])
+            except (TypeError, ValueError):
+                pass
+        if info.get("targetHighPrice"):
+            try:
+                out["target_high"] = float(info["targetHighPrice"])
+            except (TypeError, ValueError):
+                pass
+        if info.get("targetLowPrice"):
+            try:
+                out["target_low"] = float(info["targetLowPrice"])
+            except (TypeError, ValueError):
+                pass
+        if info.get("numberOfAnalystOpinions"):
+            try:
+                out["target_count"] = int(info["numberOfAnalystOpinions"])
+            except (TypeError, ValueError):
+                pass
+
+        # Current price for upside calculation
+        current = info.get("currentPrice") or info.get("regularMarketPrice")
+        if current and out.get("target_mean"):
+            try:
+                cur = float(current)
+                if cur > 0:
+                    out["upside_pct"] = (out["target_mean"] - cur) / cur * 100
+            except (TypeError, ValueError):
+                pass
+
+        # Recommendation fields
+        rec_key = info.get("recommendationKey")
+        if rec_key:
+            label_map = {
+                "strong_buy": "Strong Buy",
+                "buy": "Buy",
+                "hold": "Hold",
+                "sell": "Sell",
+                "strong_sell": "Strong Sell",
+                "underperform": "Sell",  # Yahoo sometimes uses these
+                "outperform": "Buy",
+            }
+            out["rec_label"] = label_map.get(rec_key.lower(), rec_key.replace("_", " ").title())
+            out["rec_key"] = rec_key.lower()
+        if info.get("recommendationMean"):
+            try:
+                out["rec_mean"] = float(info["recommendationMean"])
+            except (TypeError, ValueError):
+                pass
+
+        # ── recommendations DataFrame: detailed buy/hold/sell counts ──
+        try:
+            recs_df = t.recommendations
+            if recs_df is not None and not recs_df.empty:
+                latest = recs_df.iloc[0]  # most recent row
+                # Yahoo uses different column names — try common variants
+                for src_col, dest_key in [
+                    ("strongBuy", "strong_buy"),
+                    ("buy", "buy"),
+                    ("hold", "hold"),
+                    ("sell", "sell"),
+                    ("strongSell", "strong_sell"),
+                ]:
+                    if src_col in latest.index:
+                        try:
+                            out[dest_key] = int(latest[src_col])
+                        except (TypeError, ValueError):
+                            pass
+
+                if any(k in out for k in ("strong_buy", "buy", "hold", "sell", "strong_sell")):
+                    out["total_analysts"] = sum(
+                        out.get(k, 0)
+                        for k in ("strong_buy", "buy", "hold", "sell", "strong_sell")
+                    )
+        except Exception:
+            pass  # no recommendations DataFrame available
+
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def analyst_rating_html(analyst: dict) -> str:
+    """Render the analyst recommendation as a small colored badge."""
+    if not analyst or analyst.get("error"):
+        return ""
+    rec_key = analyst.get("rec_key", "")
+    rec_label = analyst.get("rec_label", "")
+    if not rec_label:
+        return ""
+
+    # Color scheme: bullish green → bearish red
+    color_map = {
+        "strong_buy": ("#dcfce7", "#15803d"),
+        "buy":        ("#d1fae5", "#047857"),
+        "outperform": ("#d1fae5", "#047857"),
+        "hold":       ("#fef3c7", "#92400e"),
+        "sell":       ("#fee2e2", "#b91c1c"),
+        "underperform": ("#fee2e2", "#b91c1c"),
+        "strong_sell": ("#fecaca", "#991b1b"),
+    }
+    bg, fg = color_map.get(rec_key, ("#f1f5f9", "#475569"))
+
+    # Detailed counts if we have them
+    detail = ""
+    total = analyst.get("total_analysts", 0)
+    if total:
+        bullish = analyst.get("strong_buy", 0) + analyst.get("buy", 0)
+        detail = f" {bullish}/{total}"
+
+    return (
+        f"<span style='background:{bg}; color:{fg}; padding:2px 8px; border-radius:4px; "
+        f"font-size:0.75em; font-weight:600;'>🎯 {html.escape(rec_label)}{detail}</span>"
+    )
+
+
+def price_target_html(analyst: dict, current_price: float) -> str:
+    """Render the price-target info as a compact line."""
+    if not analyst or not analyst.get("target_mean"):
+        return ""
+    mean = analyst["target_mean"]
+    upside = analyst.get("upside_pct")
+    if upside is None and current_price > 0:
+        upside = (mean - current_price) / current_price * 100
+
+    if upside is None:
+        return f"<span style='color:#64748b; font-size:0.8em;'>💰 Target: ${mean:.2f}</span>"
+
+    # Color upside vs downside
+    if upside >= 10:
+        color = "#15803d"
+    elif upside >= 0:
+        color = "#0891b2"
+    elif upside >= -10:
+        color = "#92400e"
+    else:
+        color = "#b91c1c"
+
+    high = analyst.get("target_high")
+    low = analyst.get("target_low")
+    range_str = ""
+    if high and low and high != low:
+        range_str = f" <span style='color:#94a3b8;'>(${low:.0f}-${high:.0f})</span>"
+
+    return (
+        f"<span style='font-size:0.8em;'>💰 Target: <b>${mean:.2f}</b>{range_str} · "
+        f"<b style='color:{color};'>{upside:+.1f}%</b></span>"
+    )
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1896,7 +2160,7 @@ def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "
             # For items 4-8, just title + age
             headlines_for_ai.append(f"[{age}] {title}")
 
-    ai = ai_analyze_stock(ticker, headlines_for_ai)
+    ai = ai_analyze_stock(ticker, headlines_for_ai, news_items=final_news)
 
     # Persist today's sentiment so we can draw sparklines and detect trends
     try:
@@ -1908,6 +2172,9 @@ def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "
     macros = detect_macro_in_headlines([n["title"] for n in final_news])
     earnings = fetch_earnings_date(ticker)
 
+    # Analyst recommendations + price targets (from Yahoo, no AI cost)
+    analyst = fetch_analyst_data(ticker)
+
     # Count how many are recent (last 24h) — key signal of "something happening"
     recent_24h = sum(1 for n in final_news
                      if n["pub_dt"] and (datetime.now() - n["pub_dt"]).total_seconds() < 86400)
@@ -1915,6 +2182,7 @@ def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "
     return {
         "meta": meta, "price": price, "news": final_news,
         "ai": ai, "macros": macros, "earnings": earnings,
+        "analyst": analyst,
         "news_count": len(combined),
         "recent_24h": recent_24h,
     }
@@ -1951,7 +2219,8 @@ with st.spinner("Analyzing watchlist (parallel fetch — should be ~15-20s on fi
                     "news": [], "ai": {"sentiment": "NEUTRAL", "score": 0, "summary": "",
                                        "news_briefing": "", "action": "IGNORE",
                                        "headline_analysis": [], "source": f"error: {e}"},
-                    "macros": [], "earnings": None, "news_count": 0, "recent_24h": 0,
+                    "macros": [], "earnings": None, "analyst": {},
+                    "news_count": 0, "recent_24h": 0,
                 }
             completed += 1
             progress.progress(completed / total)
@@ -2184,6 +2453,22 @@ for ticker in visible_tickers:
             safe_summary = ai["summary"].replace("_", " ").replace("*", "").replace("`", "")
             st.markdown(f"💬 _{safe_summary}_")
 
+        # ━━ ANALYST RATING + PRICE TARGET (Yahoo, free, no AI) ━━
+        # Shows long-term Wall Street view as a complement to short-term news sentiment.
+        analyst = card.get("analyst", {})
+        rating_html = analyst_rating_html(analyst)
+        target_html = price_target_html(analyst, price.get("price", 0))
+        if rating_html or target_html:
+            parts = [p for p in [rating_html, target_html] if p]
+            st.markdown(
+                "<div style='display:flex; gap:14px; align-items:center; flex-wrap:wrap; "
+                "margin: 6px 0 4px 0; padding: 6px 10px; background: #f8fafc; "
+                "border-radius: 6px; border-left: 3px solid #0891b2;'>"
+                + " · ".join(parts)
+                + "</div>",
+                unsafe_allow_html=True
+            )
+
         # DIP-BUY ANALYSIS — strategy-specific scoring
         dip = dip_buy_score(ticker, price, ai, card)
         st.markdown(
@@ -2196,6 +2481,18 @@ for ticker in visible_tickers:
             f"</div>",
             unsafe_allow_html=True
         )
+
+        # ━━ Quick link to the checklist page (no extra code, just navigation) ━━
+        try:
+            st.page_link(
+                "pages/02_Notes.py",
+                label=f"📋 Open this in checklist (Notes page)",
+                icon=None,
+                use_container_width=False,
+            )
+        except Exception:
+            # Older Streamlit versions don't have page_link — fail silently
+            pass
 
         # NEWS BRIEFING — now small dropdown as you asked
         if ai.get("news_briefing"):
