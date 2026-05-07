@@ -18,8 +18,10 @@ NOT a buy/sell signal generator. A news triage tool.
 import os
 import json
 import re
-from datetime import datetime, timedelta
+import html
+from datetime import datetime, timedelta, date
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import streamlit as st
@@ -27,6 +29,8 @@ import yfinance as yf
 import feedparser
 import plotly.graph_objects as go
 from groq import Groq
+
+import storage
 
 # Optional dependencies — graceful fallback if not installed
 try:
@@ -103,6 +107,58 @@ NEGATIVE_WORDS = {
     "lawsuit", "investigation", "probe", "fraud", "decline", "cuts", "cut", "layoff",
     "layoffs", "bankruptcy", "missed", "slump", "shortage", "overvalued",
 }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATALYST CALENDAR — known macro events that create gap risk for swing trades
+# Update this list yearly. Dates are in ISO format (YYYY-MM-DD).
+# Sources: Federal Reserve schedule (fomc.gov), BLS release calendar (bls.gov)
+# ═══════════════════════════════════════════════════════════════════════════
+KNOWN_CATALYSTS_2026 = [
+    # FOMC meetings (rate decisions) — typically 2-day, decision on day 2
+    {"date": "2026-01-28", "event": "FOMC rate decision", "category": "fed", "severity": "high"},
+    {"date": "2026-03-18", "event": "FOMC rate decision + SEP",  "category": "fed", "severity": "high"},
+    {"date": "2026-04-29", "event": "FOMC rate decision", "category": "fed", "severity": "high"},
+    {"date": "2026-06-17", "event": "FOMC rate decision + SEP",  "category": "fed", "severity": "high"},
+    {"date": "2026-07-29", "event": "FOMC rate decision", "category": "fed", "severity": "high"},
+    {"date": "2026-09-16", "event": "FOMC rate decision + SEP",  "category": "fed", "severity": "high"},
+    {"date": "2026-11-04", "event": "FOMC rate decision", "category": "fed", "severity": "high"},
+    {"date": "2026-12-16", "event": "FOMC rate decision + SEP",  "category": "fed", "severity": "high"},
+    # CPI releases (typically mid-month, 8:30am ET)
+    {"date": "2026-05-12", "event": "CPI (Apr)", "category": "macro", "severity": "high"},
+    {"date": "2026-06-10", "event": "CPI (May)", "category": "macro", "severity": "high"},
+    {"date": "2026-07-15", "event": "CPI (Jun)", "category": "macro", "severity": "high"},
+    {"date": "2026-08-12", "event": "CPI (Jul)", "category": "macro", "severity": "high"},
+    {"date": "2026-09-10", "event": "CPI (Aug)", "category": "macro", "severity": "high"},
+    {"date": "2026-10-14", "event": "CPI (Sep)", "category": "macro", "severity": "high"},
+    {"date": "2026-11-12", "event": "CPI (Oct)", "category": "macro", "severity": "high"},
+    {"date": "2026-12-10", "event": "CPI (Nov)", "category": "macro", "severity": "high"},
+    # NFP / Jobs reports (first Friday of each month)
+    {"date": "2026-05-01", "event": "Jobs report (Apr)", "category": "macro", "severity": "med"},
+    {"date": "2026-06-05", "event": "Jobs report (May)", "category": "macro", "severity": "med"},
+    {"date": "2026-07-02", "event": "Jobs report (Jun)", "category": "macro", "severity": "med"},
+    {"date": "2026-08-07", "event": "Jobs report (Jul)", "category": "macro", "severity": "med"},
+    {"date": "2026-09-04", "event": "Jobs report (Aug)", "category": "macro", "severity": "med"},
+    {"date": "2026-10-02", "event": "Jobs report (Sep)", "category": "macro", "severity": "med"},
+    {"date": "2026-11-06", "event": "Jobs report (Oct)", "category": "macro", "severity": "med"},
+    {"date": "2026-12-04", "event": "Jobs report (Nov)", "category": "macro", "severity": "med"},
+]
+
+
+def upcoming_catalysts(days_ahead: int = 30) -> list[dict]:
+    """Return calendar events from today through `days_ahead` days, oldest first."""
+    today = date.today()
+    cutoff = today + timedelta(days=days_ahead)
+    out = []
+    for c in KNOWN_CATALYSTS_2026:
+        try:
+            d = date.fromisoformat(c["date"])
+            if today <= d <= cutoff:
+                days_away = (d - today).days
+                out.append({**c, "days_away": days_away, "date_obj": d})
+        except (ValueError, TypeError):
+            continue
+    out.sort(key=lambda x: x["date_obj"])
+    return out
 
 
 # ============================================================================
@@ -401,6 +457,14 @@ def fetch_price_data(ticker: str) -> dict:
         rs = gain / loss.replace(0, 1e-9)
         rsi = (100 - 100 / (1 + rs)).iloc[-1]
         avg_range = ((hist["High"] - hist["Low"]) / hist["Close"]).rolling(20).mean().iloc[-1] * 100
+
+        # ━━ Volume analysis: distinguish panic dips from exhaustion dips ━━
+        # vol_ratio = today's volume / 20-day average. >1.5 on a down day = panic.
+        last_vol = hist["Volume"].iloc[-1] if "Volume" in hist.columns else 0
+        avg_vol_20 = hist["Volume"].rolling(20).mean().iloc[-1] if len(hist) >= 20 else last_vol
+        vol_ratio = float(last_vol / avg_vol_20) if avg_vol_20 > 0 else 1.0
+        last_was_down = bool(day_pct < 0)
+
         year_hist = t.history(period="1y", interval="1d")
         hi_52 = year_hist["High"].max() if not year_hist.empty else last
         lo_52 = year_hist["Low"].min() if not year_hist.empty else last
@@ -412,6 +476,8 @@ def fetch_price_data(ticker: str) -> dict:
             "avg_daily_range": float(avg_range) if not pd.isna(avg_range) else 0.0,
             "hi_52w": float(hi_52), "lo_52w": float(lo_52),
             "pct_from_hi": float(pct_from_hi),
+            "vol_ratio": vol_ratio,
+            "last_was_down": last_was_down,
             "history": hist, "error": None,
         }
     except Exception as e:
@@ -891,7 +957,14 @@ def fetch_macro_news() -> list[dict]:
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_market_overview() -> dict:
     out = {}
-    for sym, label in [("^GSPC", "S&P 500"), ("^IXIC", "Nasdaq"), ("^VIX", "VIX"), ("^GDAXI", "DAX")]:
+    symbols = [
+        ("^GSPC", "S&P 500"),
+        ("^IXIC", "Nasdaq"),
+        ("^VIX", "VIX"),
+        ("^GDAXI", "DAX"),
+        ("EURUSD=X", "EUR/USD"),  # FX exposure for EU-based USD-stock investor
+    ]
+    for sym, label in symbols:
         try:
             t = yf.Ticker(sym)
             hist = t.history(period="5d", interval="1d")
@@ -921,6 +994,26 @@ def fetch_earnings_date(ticker: str) -> Optional[str]:
                     days_away = (ed - datetime.now().date()).days if hasattr(ed, "year") else 999
                     if 0 <= days_away <= 14:
                         return ed.strftime("%b %d") + f" ({days_away}d)"
+        return None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_earnings_date_obj(ticker: str) -> Optional[date]:
+    """Return raw earnings date object for the catalyst calendar. Cached 1h."""
+    try:
+        t = yf.Ticker(ticker)
+        cal = t.calendar
+        if not isinstance(cal, dict):
+            return None
+        ed = cal.get("Earnings Date")
+        if not ed:
+            return None
+        if isinstance(ed, list) and ed:
+            ed = ed[0]
+        if hasattr(ed, "year"):
+            return ed
         return None
     except Exception:
         return None
@@ -957,6 +1050,44 @@ def detect_macro_in_headlines(headlines: list[str]) -> list[str]:
         if any(kw in text for kw in keywords):
             found.add(category)
     return sorted(found)
+
+
+def sentiment_sparkline_svg(history: list[dict], width: int = 80, height: int = 22) -> str:
+    """Tiny inline SVG sparkline of sentiment score over time (last N days)."""
+    if not history or len(history) < 2:
+        return ""
+    scores = [max(-1.0, min(1.0, h.get("score", 0))) for h in history]
+    n = len(scores)
+    points = []
+    for i, s in enumerate(scores):
+        x = i * (width / max(1, n - 1))
+        y = height - ((s + 1) / 2) * height
+        points.append(f"{x:.1f},{y:.1f}")
+    pts_str = " ".join(points)
+    last = scores[-1]
+    color = "#10b981" if last > 0.2 else "#ef4444" if last < -0.2 else "#94a3b8"
+    return (
+        f"<svg width='{width}' height='{height}' "
+        f"style='vertical-align:middle; margin-left:4px;' aria-hidden='true'>"
+        f"<line x1='0' y1='{height/2}' x2='{width}' y2='{height/2}' "
+        f"stroke='#cbd5e1' stroke-width='0.5' stroke-dasharray='2,2'/>"
+        f"<polyline fill='none' stroke='{color}' stroke-width='1.5' points='{pts_str}'/>"
+        f"</svg>"
+    )
+
+
+def trend_badge(trend: str) -> str:
+    """Small badge for sentiment trend: IMPROVING / DETERIORATING / STABLE."""
+    if trend == "IMPROVING":
+        return ("<span style='background:#dcfce7;color:#15803d;padding:1px 5px;"
+                "border-radius:3px;font-size:0.7em;font-weight:600;'>↗ IMPROVING</span>")
+    if trend == "DETERIORATING":
+        return ("<span style='background:#fee2e2;color:#b91c1c;padding:1px 5px;"
+                "border-radius:3px;font-size:0.7em;font-weight:600;'>↘ DETERIORATING</span>")
+    if trend == "STABLE":
+        return ("<span style='background:#f1f5f9;color:#64748b;padding:1px 5px;"
+                "border-radius:3px;font-size:0.7em;'>→ STABLE</span>")
+    return ""
 
 
 def sentiment_bar_html(score: float) -> str:
@@ -1079,6 +1210,25 @@ def dip_buy_score(ticker: str, price: dict, ai: dict, card: dict) -> dict:
         reasons_neg.append("News heavily negative = real problem, not just dip")
     elif sentiment == "POSITIVE":
         reasons_neg.append("News positive = no dip, momentum already up")
+
+    # ━━ VOLUME CONFIRMATION ━━
+    # On a DOWN day: high volume = panic (falling knife), low volume = exhaustion (good dip)
+    # On an UP day: not informative for dip-buying
+    vol_ratio = price.get("vol_ratio", 1.0)
+    last_was_down = price.get("last_was_down", False)
+    if last_was_down:
+        if vol_ratio >= 2.0:
+            score -= 15
+            reasons_neg.append(f"Volume {vol_ratio:.1f}× avg on down day = panic, falling knife risk")
+        elif vol_ratio >= 1.5:
+            score -= 5
+            reasons_neg.append(f"Volume {vol_ratio:.1f}× avg on down day = elevated selling")
+        elif vol_ratio < 0.8:
+            score += 10
+            reasons_pos.append(f"Volume {vol_ratio:.1f}× avg on down day = exhaustion, sellers running out")
+        elif vol_ratio < 1.0:
+            score += 5
+            reasons_pos.append(f"Volume {vol_ratio:.1f}× avg on down day = mild selling, not panic")
 
     # ━━ HARD KILLS (subtract big) ━━
     if earnings:
@@ -1328,7 +1478,12 @@ overview = fetch_market_overview()
 if overview:
     cols = st.columns(len(overview))
     for col, (label, data) in zip(cols, overview.items()):
-        col.metric(label, f"{data['price']:.0f}", f"{data['pct']:+.2f}%")
+        # FX pairs need 4 decimals; indices look better as integers
+        if "/" in label:
+            price_str = f"{data['price']:.4f}"
+        else:
+            price_str = f"{data['price']:,.0f}"
+        col.metric(label, price_str, f"{data['pct']:+.2f}%")
 
 if "VIX" in overview and overview["VIX"]["price"] > 25:
     st.markdown(
@@ -1394,17 +1549,22 @@ for i, n in enumerate(macro_news[:12]):
 macro_result = ai_macro_brief(macro_headlines_with_age, list(ACTIVE_WATCHLIST.keys()))
 
 if macro_result.get("brief"):
-    st.markdown(f"<div class='macro-card'>{macro_result['brief']}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='macro-card'>{html.escape(macro_result['brief'])}</div>",
+        unsafe_allow_html=True
+    )
     if macro_result.get("winners"):
+        winners_str = ", ".join(html.escape(w) for w in macro_result["winners"])
         st.markdown(
             f"<div class='macro-affected'>🟢 <b>Likely winners on your watchlist:</b> "
-            f"{', '.join(macro_result['winners'])} — <i>{macro_result.get('winner_reason','')}</i></div>",
+            f"{winners_str} — <i>{html.escape(macro_result.get('winner_reason',''))}</i></div>",
             unsafe_allow_html=True
         )
     if macro_result.get("losers"):
+        losers_str = ", ".join(html.escape(l) for l in macro_result["losers"])
         st.markdown(
             f"<div class='macro-affected bad'>🔴 <b>Likely losers on your watchlist:</b> "
-            f"{', '.join(macro_result['losers'])} — <i>{macro_result.get('loser_reason','')}</i></div>",
+            f"{losers_str} — <i>{html.escape(macro_result.get('loser_reason',''))}</i></div>",
             unsafe_allow_html=True
         )
 elif macro_news:
@@ -1419,9 +1579,8 @@ with st.expander(f"📃 See all macro headlines ({len(macro_news)} items, sorted
         age = n.get("age_str", "?")
         cat = n.get("category", "?").upper()
         publisher = n.get("publisher", "")
-        # Color-code age
-        age_color = "#15803d" if "h ago" in age and "h ago" in age else "#64748b"
-        if "m ago" in age:
+        # Color-code age (greener = fresher)
+        if "m ago" in age or "just now" in age:
             age_color = "#15803d"
         elif "h ago" in age:
             try:
@@ -1435,13 +1594,78 @@ with st.expander(f"📃 See all macro headlines ({len(macro_news)} items, sorted
         st.markdown(
             f"<div style='padding:6px 0; border-bottom:1px solid #f1f5f9;'>"
             f"<span style='background:#e0e7ff; color:#3730a3; padding:1px 6px; border-radius:3px; "
-            f"font-size:0.7em; font-weight:600; margin-right:6px;'>{cat}</span>"
-            f"<a href='{n['link']}' target='_blank' style='color:#1e40af;'>{n['title']}</a>"
+            f"font-size:0.7em; font-weight:600; margin-right:6px;'>{html.escape(cat)}</span>"
+            f"<a href='{html.escape(n['link'], quote=True)}' target='_blank' rel='noopener noreferrer' "
+            f"style='color:#1e40af;'>{html.escape(n['title'])}</a>"
             f"<div style='font-size:0.78em; color:#94a3b8; margin-top:2px;'>"
-            f"{publisher} · <span style='color:{age_color}; font-weight:600;'>🕐 {age}</span>"
+            f"{html.escape(publisher)} · <span style='color:{age_color}; font-weight:600;'>🕐 {age}</span>"
             f"</div></div>",
             unsafe_allow_html=True
         )
+
+# ============================================================================
+# CATALYST CALENDAR — gap-risk events for the next 30 days
+# ============================================================================
+
+st.markdown("### 📅 Catalyst Calendar (next 30 days)")
+st.caption("Macro events + your watchlist earnings. Avoid opening new swing positions ≤ 2 days before a high-severity event.")
+
+upcoming = upcoming_catalysts(days_ahead=30)
+
+# Pull earnings within 30 days for the active watchlist (cached helper = fast)
+watchlist_earnings = []
+for t in ACTIVE_WATCHLIST:
+    ed = fetch_earnings_date_obj(t)
+    if ed is None:
+        continue
+    days_away = (ed - date.today()).days
+    if 0 <= days_away <= 30:
+        watchlist_earnings.append({
+            "date_obj": ed,
+            "date": ed.isoformat(),
+            "event": f"{t} earnings",
+            "category": "earnings",
+            "severity": "high" if days_away <= 14 else "med",
+            "days_away": days_away,
+            "ticker": t,
+        })
+
+all_events = upcoming + watchlist_earnings
+all_events.sort(key=lambda e: e["date_obj"])
+
+if not all_events:
+    st.info("No major events scheduled in the next 30 days.")
+else:
+    # Render as a compact two-column grid
+    n_cols = 3
+    rows = [all_events[i:i+n_cols] for i in range(0, len(all_events), n_cols)]
+    for row in rows:
+        cols = st.columns(n_cols)
+        for col, ev in zip(cols, row):
+            sev = ev.get("severity", "med")
+            cat = ev.get("category", "")
+            days_away = ev["days_away"]
+            # Color by urgency
+            if days_away <= 2:
+                bg, fg, border = "#fee2e2", "#991b1b", "#ef4444"
+                urgency = "🔴 IMMINENT"
+            elif days_away <= 7:
+                bg, fg, border = "#fef3c7", "#92400e", "#f59e0b"
+                urgency = "🟡 THIS WEEK"
+            else:
+                bg, fg, border = "#eff6ff", "#1e40af", "#3b82f6"
+                urgency = "🔵 UPCOMING"
+            cat_emoji = {"fed": "🏦", "macro": "📊", "earnings": "💰"}.get(cat, "📌")
+            col.markdown(
+                f"<div style='background:{bg}; border-left:3px solid {border}; "
+                f"border-radius:6px; padding:8px 10px; margin-bottom:6px;'>"
+                f"<div style='font-size:0.7em; color:{fg}; font-weight:700; letter-spacing:0.4px;'>{urgency}</div>"
+                f"<div style='font-weight:600; color:{fg}; margin-top:2px;'>{cat_emoji} {html.escape(ev['event'])}</div>"
+                f"<div style='font-size:0.8em; color:#64748b; margin-top:2px;'>"
+                f"{ev['date_obj'].strftime('%a %b %d')} · in {days_away}d"
+                f"</div></div>",
+                unsafe_allow_html=True
+            )
 
 # ============================================================================
 # SECTION 3: WATCHLIST
@@ -1528,6 +1752,14 @@ def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "
             headlines_for_ai.append(f"[{age}] {title}")
 
     ai = ai_analyze_stock(ticker, headlines_for_ai)
+
+    # Persist today's sentiment so we can draw sparklines and detect trends
+    try:
+        if ai.get("source") == "ai" and ai.get("sentiment") not in (None, "QUIET"):
+            storage.record_sentiment(ticker, ai["sentiment"], ai.get("score", 0.0))
+    except Exception:
+        pass  # Storage failure shouldn't break the dashboard
+
     macros = detect_macro_in_headlines([n["title"] for n in final_news])
     earnings = fetch_earnings_date(ticker)
 
@@ -1543,20 +1775,45 @@ def build_stock_card_data(ticker: str, meta_name: str = "", meta_sector: str = "
     }
 
 
-with st.spinner("Analyzing watchlist (this takes ~45s on first load — AI is reading every headline)..."):
+with st.spinner("Analyzing watchlist (parallel fetch — should be ~15-20s on first load)..."):
     cards = {}
     progress = st.progress(0)
-    for idx, ticker in enumerate(ordered_tickers):
+    total = len(ordered_tickers)
+
+    def _build_one(ticker: str) -> tuple[str, dict]:
         m = ACTIVE_WATCHLIST[ticker]
-        cards[ticker] = build_stock_card_data(
+        return ticker, build_stock_card_data(
             ticker,
             meta_name=m.get("name", ticker),
             meta_sector=m.get("sector", ""),
             meta_type=m.get("type", "swing"),
             meta_priority=m.get("priority", "med"),
         )
-        progress.progress((idx + 1) / len(ordered_tickers))
+
+    # 4 workers: fast enough to feel snappy, conservative enough to stay under
+    # Groq rate limits (concurrent AI calls are the limiting factor here).
+    completed = 0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_build_one, t): t for t in ordered_tickers}
+        for future in as_completed(futures):
+            try:
+                ticker, card = future.result()
+                cards[ticker] = card
+            except Exception as e:
+                t = futures[future]
+                cards[t] = {
+                    "meta": ACTIVE_WATCHLIST[t], "price": {"error": str(e)},
+                    "news": [], "ai": {"sentiment": "NEUTRAL", "score": 0, "summary": "",
+                                       "news_briefing": "", "action": "IGNORE",
+                                       "headline_analysis": [], "source": f"error: {e}"},
+                    "macros": [], "earnings": None, "news_count": 0, "recent_24h": 0,
+                }
+            completed += 1
+            progress.progress(completed / total)
     progress.empty()
+
+    # Re-order cards dict to match the originally-ordered tickers (futures complete out of order)
+    cards = {t: cards[t] for t in ordered_tickers if t in cards}
 
 
 # Pre-compute dip-buy scores for all stocks (needed for Top Picks + Calm Mode)
@@ -1732,7 +1989,8 @@ for ticker in visible_tickers:
                 macro_tag = " <span style='background:#dcfce7;color:#15803d;padding:1px 6px;border-radius:4px;font-size:0.75em'>MACRO WIN</span>"
             elif is_macro_loser:
                 macro_tag = " <span style='background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:4px;font-size:0.75em'>MACRO LOSS</span>"
-            st.markdown(f"**{pin}{ticker}** · {meta['name']}{macro_tag}", unsafe_allow_html=True)
+            st.markdown(f"**{pin}{html.escape(ticker)}** · {html.escape(meta['name'])}{macro_tag}",
+                        unsafe_allow_html=True)
             st.caption(f"{meta['sector']} · {meta['type']}")
 
         with c2:
@@ -1744,7 +2002,17 @@ for ticker in visible_tickers:
             st.caption(f"RSI: {price['rsi']:.0f}")
 
         with c4:
-            st.markdown(f"{sentiment_icon(ai['sentiment'])} **{ai['sentiment']}**")
+            # Get trend + sparkline data
+            sent_history = storage.get_sentiment_history(ticker, days=14)
+            trend = storage.get_sentiment_trend(ticker, days=5)
+            sparkline = sentiment_sparkline_svg(sent_history) if sent_history else ""
+            trend_html = trend_badge(trend) if trend != "NEW" else ""
+
+            st.markdown(
+                f"{sentiment_icon(ai['sentiment'])} **{html.escape(ai['sentiment'])}** "
+                f"{trend_html} {sparkline}",
+                unsafe_allow_html=True
+            )
             # Sentiment bar replaces plain "Score: +0.20"
             st.markdown(sentiment_bar_html(ai["score"]), unsafe_allow_html=True)
 
@@ -1767,7 +2035,9 @@ for ticker in visible_tickers:
 
         # Quick bottom-line summary (1 sentence)
         if ai.get("summary"):
-            st.markdown(f"💬 _{ai['summary']}_")
+            # Strip backticks/asterisks that would break the markdown italics wrapping
+            safe_summary = ai["summary"].replace("_", " ").replace("*", "").replace("`", "")
+            st.markdown(f"💬 _{safe_summary}_")
 
         # DIP-BUY ANALYSIS — strategy-specific scoring
         dip = dip_buy_score(ticker, price, ai, card)
@@ -1786,7 +2056,7 @@ for ticker in visible_tickers:
         if ai.get("news_briefing"):
             with st.expander("📋 Read full news briefing"):
                 st.markdown(
-                    f"<div class='news-briefing-mini'>{ai['news_briefing']}</div>",
+                    f"<div class='news-briefing-mini'>{html.escape(ai['news_briefing'])}</div>",
                     unsafe_allow_html=True
                 )
 
@@ -1824,6 +2094,153 @@ for ticker in visible_tickers:
                         unsafe_allow_html=True
                     )
 
+        # ════════════════════════════════════════════════════════════════
+        # TRADE SETUP: pre-trade checklist + position sizing
+        # Only appears for actionable setups (score >= 45) or open positions.
+        # ════════════════════════════════════════════════════════════════
+        show_setup = (dip["score"] >= 45) or is_open
+        if show_setup:
+            with st.expander("🛒 Trade Setup — checklist + position sizing"):
+                # Default 5-question checklist; user can adapt to their PDF playbook
+                checklist_questions = [
+                    "Stock is down 3-8% over the past week (real dip, not free-fall)",
+                    "RSI is between 25 and 50 (oversold, not panic)",
+                    "No earnings within next 14 days",
+                    "News is noise/sector — not a stock-specific catastrophe (fraud/CEO/recall)",
+                    "I have a stop-loss price written down before I click Buy",
+                ]
+
+                checklist_key = f"checklist_{ticker}"
+                if checklist_key not in st.session_state:
+                    st.session_state[checklist_key] = [False] * len(checklist_questions)
+
+                st.markdown("**Pre-trade checklist** — all 5 must be ✓ before sizing appears:")
+                checks = []
+                for i, q in enumerate(checklist_questions):
+                    val = st.checkbox(
+                        q,
+                        value=st.session_state[checklist_key][i],
+                        key=f"chk_{ticker}_{i}",
+                    )
+                    st.session_state[checklist_key][i] = val
+                    checks.append(val)
+
+                all_checked = all(checks)
+
+                if not all_checked:
+                    n_done = sum(checks)
+                    st.markdown(
+                        f"<div style='padding:8px; background:#f1f5f9; border-radius:6px; "
+                        f"color:#64748b; font-size:0.85em;'>"
+                        f"☑ {n_done}/{len(checklist_questions)} checked. "
+                        f"Sizing calculator unlocks at 5/5.</div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        "<div style='padding:8px; background:#dcfce7; border-radius:6px; "
+                        "color:#166534; font-size:0.9em; font-weight:600; margin-bottom:8px;'>"
+                        "✅ Checklist complete. Below: position sizing.</div>",
+                        unsafe_allow_html=True
+                    )
+
+                    # ── Position sizing calculator ──
+                    sz1, sz2, sz3 = st.columns(3)
+                    with sz1:
+                        max_risk_eur = st.number_input(
+                            "Max risk (€)",
+                            min_value=5.0, max_value=500.0, value=30.0, step=5.0,
+                            key=f"risk_{ticker}",
+                            help="Total euros you're willing to lose if the stop hits.",
+                        )
+                    with sz2:
+                        stop_pct = st.slider(
+                            "Stop loss (%)",
+                            min_value=3.0, max_value=12.0, value=6.0, step=0.5,
+                            key=f"stop_{ticker}",
+                            help="How far below your entry the stop sits.",
+                        )
+                    with sz3:
+                        eur_usd = overview.get("EUR/USD", {}).get("price", 1.08)
+                        st.metric("EUR/USD", f"{eur_usd:.4f}",
+                                  label_visibility="visible")
+
+                    entry_usd = price["price"]
+                    stop_price_usd = entry_usd * (1 - stop_pct / 100)
+                    risk_per_share_usd = entry_usd - stop_price_usd
+                    max_risk_usd = max_risk_eur * eur_usd
+                    if risk_per_share_usd > 0:
+                        n_shares = int(max_risk_usd / risk_per_share_usd)
+                    else:
+                        n_shares = 0
+                    position_usd = n_shares * entry_usd
+                    position_eur = position_usd / eur_usd if eur_usd > 0 else 0
+
+                    if n_shares > 0:
+                        st.markdown(
+                            f"<div style='background:#f0fdf4; border-left:4px solid #10b981; "
+                            f"border-radius:6px; padding:12px 14px; margin-top:8px;'>"
+                            f"<div style='font-size:0.75em; color:#15803d; font-weight:600; "
+                            f"text-transform:uppercase; letter-spacing:0.5px;'>Suggested position</div>"
+                            f"<div style='font-size:1.4em; font-weight:700; color:#0f172a; margin:4px 0;'>"
+                            f"{n_shares} shares @ ${entry_usd:.2f}</div>"
+                            f"<div style='font-size:0.85em; color:#475569; line-height:1.6;'>"
+                            f"Position value: <b>${position_usd:,.2f}</b> (€{position_eur:,.2f})<br>"
+                            f"Stop-loss at: <b>${stop_price_usd:.2f}</b> ({stop_pct:.1f}% below entry)<br>"
+                            f"Risk if stop hits: <b>€{max_risk_eur:.2f}</b> "
+                            f"(${max_risk_usd:.2f})"
+                            f"</div></div>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.warning("Position size rounds to 0 shares — share price too high "
+                                   "for your risk budget. Increase max risk or pick a lower-priced stock.")
+
+        # ════════════════════════════════════════════════════════════════
+        # JOURNAL: log this decision (always available, even for skips)
+        # ════════════════════════════════════════════════════════════════
+        with st.expander("📝 Log this decision to journal"):
+            jl1, jl2 = st.columns([1, 2])
+            with jl1:
+                action_choice = st.selectbox(
+                    "Decision",
+                    options=["WATCH", "BUY", "SKIP", "SELL"],
+                    key=f"journal_action_{ticker}",
+                    help="What did you decide right now?",
+                )
+            with jl2:
+                reason_text = st.text_input(
+                    "Reason (1 line)",
+                    placeholder="e.g. RSI 32, news mixed, dip score 68 — entering",
+                    key=f"journal_reason_{ticker}",
+                )
+
+            log_btn = st.button(
+                f"📝 Log {action_choice} for {ticker}",
+                key=f"journal_btn_{ticker}",
+                use_container_width=False,
+            )
+            if log_btn:
+                if not reason_text.strip():
+                    st.error("Add a reason — future-you will thank you.")
+                else:
+                    try:
+                        entry = storage.add_journal_entry(
+                            ticker=ticker,
+                            action=action_choice,
+                            price_at_decision=price["price"],
+                            reason=reason_text.strip(),
+                            dip_score=dip["score"],
+                            sentiment=ai.get("sentiment"),
+                            sentiment_score=ai.get("score"),
+                            rsi=price.get("rsi"),
+                            week_pct=price.get("week_pct"),
+                        )
+                        st.success(f"✅ Logged. See the 📓 Journal page in the sidebar. "
+                                   f"Entry id: {entry['id'][-6:]}")
+                    except Exception as e:
+                        st.error(f"Could not save: {e}")
+
         # PER-HEADLINE BREAKDOWN
         with st.expander(f"📃 Headlines with AI verdict for {ticker} ({card['news_count']} items)"):
             cc1, cc2 = st.columns([3, 1.2])
@@ -1842,8 +2259,13 @@ for ticker in visible_tickers:
                         pub = n.get("publisher", "")
                         age = n.get("age_str", "?")
                         relevance = n.get("relevance", "MEDIUM")
-                        title_html = f"<a href='{url}' target='_blank'>{h_clean}</a>" if url else h_clean
-                        why = item.get("why", "")
+                        # Escape user/web/AI-supplied text before injecting into HTML
+                        h_clean_esc = html.escape(h_clean)
+                        url_esc = html.escape(url, quote=True)
+                        pub_esc = html.escape(pub)
+                        why_esc = html.escape(item.get("why", ""))
+                        title_html = (f"<a href='{url_esc}' target='_blank' rel='noopener noreferrer'>{h_clean_esc}</a>"
+                                      if url else h_clean_esc)
 
                         # Relevance badge
                         if relevance == "HIGH":
@@ -1869,8 +2291,8 @@ for ticker in visible_tickers:
                             f"<div class='impact-cell'>{impact_badge(item['impact'])}</div>"
                             f"<div class='headline-cell'>"
                             f"<div class='headline-title'>{title_html} {rel_badge}</div>"
-                            f"<div class='headline-why'>→ {why} "
-                            f"<span style='color:#94a3b8'>· {pub} · </span>{age_html}</div>"
+                            f"<div class='headline-why'>→ {why_esc} "
+                            f"<span style='color:#94a3b8'>· {pub_esc} · </span>{age_html}</div>"
                             f"</div></div>",
                             unsafe_allow_html=True
                         )
