@@ -1,0 +1,1936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shakil's 30-Second Trade Check</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f172a;
+    --bg-card: #1e293b;
+    --bg-card-hover: #334155;
+    --text: #f1f5f9;
+    --text-dim: #94a3b8;
+    --text-muted: #64748b;
+    --border: #334155;
+    --green: #10b981;
+    --green-bg: rgba(16, 185, 129, 0.1);
+    --green-border: rgba(16, 185, 129, 0.3);
+    --red: #ef4444;
+    --red-bg: rgba(239, 68, 68, 0.1);
+    --red-border: rgba(239, 68, 68, 0.3);
+    --amber: #f59e0b;
+    --amber-bg: rgba(245, 158, 11, 0.1);
+    --amber-border: rgba(245, 158, 11, 0.3);
+    --teal: #06b6d4;
+    --teal-bg: rgba(6, 182, 212, 0.1);
+    --teal-border: rgba(6, 182, 212, 0.3);
+    --purple: #a855f7;
+    --purple-bg: rgba(168, 85, 247, 0.1);
+    --purple-border: rgba(168, 85, 247, 0.3);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(180deg, #0a0f1f 0%, #0f172a 100%);
+    color: var(--text);
+    line-height: 1.5;
+    min-height: 100vh;
+    padding: 16px;
+  }
+
+  .container { max-width: 1100px; margin: 0 auto; }
+
+  /* HEADER */
+  header {
+    text-align: center;
+    padding: 24px 16px 32px;
+  }
+  header h1 {
+    font-size: clamp(1.5rem, 4vw, 2.2rem);
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    background: linear-gradient(135deg, #06b6d4 0%, #a855f7 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 6px;
+  }
+  header p {
+    color: var(--text-dim);
+    font-size: 0.95rem;
+  }
+
+  /* TICKER INPUT BAR */
+  .ticker-bar {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  .ticker-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 10px;
+    align-items: end;
+    margin-bottom: 10px;
+  }
+  .ticker-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .ticker-field label {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+  .ticker-field input,
+  .ticker-notes-row input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.95rem;
+    font-weight: 600;
+    transition: border-color 0.2s, background 0.2s;
+    width: 100%;
+  }
+  #ticker-input { font-size: 1.1rem; letter-spacing: 1px; text-transform: uppercase; }
+  .ticker-field input:focus,
+  .ticker-notes-row input:focus {
+    outline: none;
+    border-color: var(--teal);
+    background: #0a1424;
+  }
+  .ticker-field input::placeholder,
+  .ticker-notes-row input::placeholder {
+    color: var(--text-muted);
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .ticker-clear {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    width: 42px;
+    height: 42px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: inherit;
+  }
+  .ticker-clear:hover {
+    background: var(--red-bg);
+    border-color: var(--red-border);
+    color: var(--red);
+  }
+  .ticker-notes-row input {
+    font-size: 0.88rem;
+    font-weight: 500;
+  }
+
+  /* MODE TABS */
+  .tabs {
+    display: flex;
+    gap: 6px;
+    background: var(--bg-card);
+    padding: 6px;
+    border-radius: 14px;
+    margin-bottom: 24px;
+    border: 1px solid var(--border);
+  }
+  .tab {
+    flex: 1;
+    padding: 12px 8px;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+    border: none;
+    background: transparent;
+    font-family: inherit;
+    letter-spacing: 0.3px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    background: linear-gradient(135deg, var(--teal) 0%, var(--purple) 100%);
+    color: white;
+    box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);
+  }
+  .tab .icon { display: block; font-size: 1.4rem; margin-bottom: 2px; }
+
+  /* MODE PANEL */
+  .mode-panel { display: none; animation: fade 0.3s ease; }
+  .mode-panel.active { display: block; }
+  @keyframes fade {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* MODE INTRO */
+  .intro {
+    background: var(--bg-card);
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+    border-left: 4px solid;
+  }
+  .intro.swing { border-color: var(--teal); }
+  .intro.day { border-color: var(--amber); }
+  .intro.long { border-color: var(--green); }
+  .intro h2 {
+    font-size: 1.1rem;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .intro p {
+    color: var(--text-dim);
+    font-size: 0.92rem;
+  }
+
+  /* CHECKS GRID */
+  .checks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+
+  .check {
+    background: var(--bg-card);
+    border-radius: 14px;
+    padding: 18px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+  .check:hover {
+    background: var(--bg-card-hover);
+    transform: translateY(-2px);
+  }
+  .check.checked {
+    border-color: var(--green-border);
+    background: var(--green-bg);
+  }
+  .check.checked::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    background: var(--green);
+  }
+
+  .check-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .check-num {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+    background: var(--bg);
+    color: var(--text-dim);
+  }
+  .check.checked .check-num {
+    background: var(--green);
+    color: white;
+  }
+
+  .check-title {
+    flex: 1;
+    font-weight: 700;
+    font-size: 1rem;
+    line-height: 1.3;
+  }
+
+  .check-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    flex-shrink: 0;
+    background: var(--bg);
+    color: var(--text-muted);
+    transition: all 0.2s;
+  }
+  .check.checked .check-icon {
+    background: var(--green);
+    color: white;
+  }
+
+  .check-question {
+    font-size: 0.88rem;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    line-height: 1.5;
+  }
+
+  .check-passfail {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    font-size: 0.78rem;
+  }
+  .check-pass, .check-fail {
+    padding: 8px 10px;
+    border-radius: 8px;
+    line-height: 1.35;
+  }
+  .check-pass {
+    background: var(--green-bg);
+    color: var(--green);
+    border: 1px solid var(--green-border);
+  }
+  .check-fail {
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid var(--red-border);
+  }
+  .check-pass strong, .check-fail strong { display: block; margin-bottom: 2px; font-size: 0.7rem; letter-spacing: 0.5px; }
+
+  /* SCORE BAR */
+  .score-card {
+    background: linear-gradient(135deg, var(--bg-card) 0%, #1a2942 100%);
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border: 1px solid var(--border);
+  }
+  .score-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .score-label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .score-display {
+    font-size: 2rem;
+    font-weight: 800;
+  }
+  .score-display .total { color: var(--text-muted); font-weight: 500; }
+  .score-bar {
+    height: 8px;
+    background: var(--bg);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+  .score-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.4s, background-color 0.4s;
+    background: var(--red);
+  }
+  .verdict {
+    text-align: center;
+    font-size: 1rem;
+    font-weight: 700;
+    padding: 12px;
+    border-radius: 10px;
+    transition: all 0.3s;
+  }
+  .verdict.bad { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+  .verdict.mid { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-border); }
+  .verdict.good { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+
+  /* RESET BUTTON */
+  .reset-btn {
+    display: block;
+    margin: 0 auto 24px;
+    padding: 10px 24px;
+    background: var(--bg-card);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .reset-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text);
+  }
+
+  /* GOLDEN RULES */
+  .rules {
+    background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-left: 4px solid var(--purple);
+  }
+  .rules h3 {
+    font-size: 0.85rem;
+    color: #c4b5fd;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 14px;
+  }
+  .rule-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 10px;
+  }
+  .rule {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 0.88rem;
+    color: #e0e7ff;
+    line-height: 1.45;
+  }
+  .rule-num {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(168, 85, 247, 0.3);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+  }
+
+  /* WARNING SECTION */
+  .warning {
+    background: var(--red-bg);
+    border: 1px solid var(--red-border);
+    border-radius: 14px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+  }
+  .warning h3 {
+    color: var(--red);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+  }
+  .warning p { font-size: 0.88rem; color: #fecaca; line-height: 1.5; }
+
+  /* FOOTER */
+  footer {
+    text-align: center;
+    padding: 32px 16px 16px;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.6;
+  }
+
+  /* MOBILE TWEAKS */
+  @media (max-width: 600px) {
+    body { padding: 10px; }
+    .checks { grid-template-columns: 1fr; gap: 10px; }
+    .check { padding: 14px; }
+    .check-passfail { grid-template-columns: 1fr; }
+    .tab { padding: 10px 4px; font-size: 0.75rem; }
+    .tab .icon { font-size: 1.2rem; }
+    .score-display { font-size: 1.6rem; }
+    .rule-list { grid-template-columns: 1fr; }
+    .ticker-row { grid-template-columns: 1fr 1fr 42px; gap: 8px; }
+    #ticker-input { font-size: 1rem; }
+  }
+
+  /* PRINT STYLES */
+  @media print {
+    body { background: white; color: black; padding: 8mm; }
+    .tabs, .reset-btn { display: none !important; }
+    .mode-panel { display: block !important; page-break-after: always; }
+    .check { break-inside: avoid; }
+    header h1 { color: #0f172a; -webkit-text-fill-color: #0f172a; }
+    .check, .intro, .score-card, .rules, .warning {
+      background: white !important;
+      color: black !important;
+      border: 1px solid #ccc !important;
+    }
+    .check-question, .check-pass, .check-fail { color: black !important; background: white !important; border: 1px solid #ccc !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+<header>
+  <h1>30-Second Trade Check</h1>
+  <p>Tap each check to mark it ✓ — score updates live</p>
+</header>
+
+<!-- TICKER INPUT BAR -->
+<div class="ticker-bar">
+  <div class="ticker-row">
+    <div class="ticker-field">
+      <label for="ticker-input">📌 Stock / Ticker</label>
+      <input
+        type="text"
+        id="ticker-input"
+        placeholder="e.g. NVDA"
+        autocomplete="off"
+        spellcheck="false">
+    </div>
+    <div class="ticker-field">
+      <label for="ticker-price">💵 Current price</label>
+      <input
+        type="text"
+        id="ticker-price"
+        placeholder="e.g. 195.50"
+        inputmode="decimal"
+        autocomplete="off">
+    </div>
+    <button class="ticker-clear" id="ticker-clear" title="Clear all">✕</button>
+  </div>
+  <div class="ticker-notes-row">
+    <input
+      type="text"
+      id="ticker-notes"
+      placeholder="Quick note: setup type, news driver, why you're looking at this..."
+      autocomplete="off">
+  </div>
+</div>
+
+<!-- MODE TABS -->
+<div class="tabs" role="tablist">
+  <button class="tab active" data-mode="swing">
+    <span class="icon">📈</span>
+    <span>SWING</span>
+  </button>
+  <button class="tab" data-mode="day">
+    <span class="icon">⚡</span>
+    <span>DAY</span>
+  </button>
+  <button class="tab" data-mode="long">
+    <span class="icon">🌳</span>
+    <span>LONG-TERM</span>
+  </button>
+  <button class="tab" data-mode="sell">
+    <span class="icon">💰</span>
+    <span>SELL</span>
+  </button>
+  <button class="tab" data-mode="ht">
+    <span class="icon">🎯</span>
+    <span>HT PATTERNS</span>
+  </button>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- SWING TRADING -->
+<!-- ════════════════════════════════════════════════ -->
+<div class="mode-panel active" id="mode-swing">
+
+  <div class="intro swing">
+    <h2>📈 Swing Trading Check</h2>
+    <p>Hold 3-15 days · Daily chart · Bucket B trades · Max €30 risk · Hard stop loss</p>
+  </div>
+
+  <div class="checks">
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">1</div>
+        <div class="check-title">Big trend UP</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is price ABOVE the dashed 200 SMA line, and the 200 SMA is rising or flat?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Price above dashed line, line rising</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Below 200 SMA — automatic skip</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">2</div>
+        <div class="check-title">Bullish EMA stack</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Are the EMAs stacked: Price > 9 (red) > 21 (blue) > 50 (yellow), all rising?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Bullish stack, lines rising</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Tangled or bearish stack</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">3</div>
+        <div class="check-title">At real support</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is price touching the 21 EMA, 50 EMA, or a horizontal level it bounced from before?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Sitting on EMA or tested level</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Mid-air or new 52-week low</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">4</div>
+        <div class="check-title">RSI 25-45 zone</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is RSI between 25 and 45 (oversold but not panic)?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>RSI in 25-45 sweet spot</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>RSI >50 (no dip) or <25 (panic)</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">5</div>
+        <div class="check-title">Reversal candle</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is today's candle GREEN with a long lower wick? (hammer or engulfing pattern)</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Green candle, lower wick rejection</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Still red or just a doji</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">6</div>
+        <div class="check-title">Volume on bounce</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is the green candle's volume bar AT or ABOVE the 20-day average line?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Volume bar above the line</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Light volume — fake bounce risk</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">7</div>
+        <div class="check-title">No earnings ≤14d</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is the next earnings report MORE than 14 days away?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Earnings far away or just passed</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Earnings within 14 days = gap risk</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="swing">
+      <div class="check-header">
+        <div class="check-num">8</div>
+        <div class="check-title">Exit plan ready</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Stop loss + profit target + position size + time stop all decided BEFORE clicking buy?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>All 4 exits planned</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>No plan = no trade</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="score-card">
+    <div class="score-row">
+      <div class="score-label">Score</div>
+      <div class="score-display"><span id="score-swing">0</span><span class="total">/8</span></div>
+    </div>
+    <div class="score-bar"><div class="score-fill" id="bar-swing" style="width: 0%"></div></div>
+    <div class="verdict bad" id="verdict-swing">Tap each check above to mark it ✓</div>
+  </div>
+
+  <button class="reset-btn" data-reset="swing">↻ Reset checks</button>
+
+  <div class="rules">
+    <h3>⭐ Swing Trading Golden Rules</h3>
+    <div class="rule-list">
+      <div class="rule"><div class="rule-num">1</div>Never buy below 200 SMA. Ever.</div>
+      <div class="rule"><div class="rule-num">2</div>Stop loss in Scalable, never in your head.</div>
+      <div class="rule"><div class="rule-num">3</div>€30 max risk per trade.</div>
+      <div class="rule"><div class="rule-num">4</div>Never hold through earnings.</div>
+      <div class="rule"><div class="rule-num">5</div>Take profits in pieces (50% at first target).</div>
+      <div class="rule"><div class="rule-num">6</div>Journal every trade within 24 hours.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- DAY TRADING -->
+<!-- ════════════════════════════════════════════════ -->
+<div class="mode-panel" id="mode-day">
+
+  <div class="intro day">
+    <h2>⚡ Day Trading Check</h2>
+    <p>Hold minutes to hours · 5-min and 15-min charts · No overnight risk · Tighter stops (1-2%)</p>
+  </div>
+
+  <div class="warning">
+    <h3>⚠ Honest Warning</h3>
+    <p>Day trading on Scalable Capital is hard because of wide spreads (€0.20-0.50 on US stocks during EU hours). Real money day trading isn't recommended for your setup. Use this checklist for paper trading only or as backup confirmation for swing entries.</p>
+  </div>
+
+  <div class="checks">
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">1</div>
+        <div class="check-title">Daily trend UP</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Switch to 1D chart first. Is the daily trend bullish? (price > 200 SMA, EMAs stacked up)</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Day trade WITH the daily trend</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Don't fight the daily trend</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">2</div>
+        <div class="check-title">Past 15:45 CET</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is it past 15:45 CET (skipped first 15 min of US open volatility)?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Open chaos has settled</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>First 15min = unpredictable</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">3</div>
+        <div class="check-title">Above VWAP</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">On 5-min chart: is price ABOVE the VWAP line? (key intraday trend filter)</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Above VWAP — buy bias valid</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Below VWAP — sellers in control</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">4</div>
+        <div class="check-title">9 EMA reclaim</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">On 5-min: did price just bounce from VWAP/9EMA with 9EMA crossing back above 21EMA?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Momentum turning up clearly</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>EMAs falling or tangled</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">5</div>
+        <div class="check-title">Volume spike</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is the green reversal candle volume 1.5×+ the recent 5-min average?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Real buyers stepping in</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Light volume = fake move</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">6</div>
+        <div class="check-title">Tight stop possible</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Can you set a stop within 1-2% (or below the recent 5-min swing low)?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Clear logical stop level</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Stop too far = position too big</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">7</div>
+        <div class="check-title">2:1 reward minimum</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is your target at least 2× the distance of your stop? (e.g. 1% stop = 2%+ target)</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Math works in your favor</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Bad R:R = losing strategy</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="day">
+      <div class="check-header">
+        <div class="check-num">8</div>
+        <div class="check-title">Exit before close</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Will you close the trade by US market close (22:00 CET), no matter what?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Day trade = same-day exit</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Holding overnight = it's now a swing</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="score-card">
+    <div class="score-row">
+      <div class="score-label">Score</div>
+      <div class="score-display"><span id="score-day">0</span><span class="total">/8</span></div>
+    </div>
+    <div class="score-bar"><div class="score-fill" id="bar-day" style="width: 0%"></div></div>
+    <div class="verdict bad" id="verdict-day">Tap each check above to mark it ✓</div>
+  </div>
+
+  <button class="reset-btn" data-reset="day">↻ Reset checks</button>
+
+  <div class="rules" style="background: linear-gradient(135deg, #422006 0%, #78350f 100%); border-color: var(--amber);">
+    <h3 style="color: #fcd34d;">⚡ Day Trading Golden Rules</h3>
+    <div class="rule-list">
+      <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">1</div>Trade WITH the daily trend, never against.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">2</div>VWAP is your bias line — above = long, below = no.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">3</div>Tight stops always (1-2%, never wider).</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">4</div>2:1 reward-to-risk minimum or skip.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">5</div>Close before market close, NO exceptions.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">6</div>Max 3 trades per day. After 3 losses → STOP.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- LONG-TERM INVESTING -->
+<!-- ════════════════════════════════════════════════ -->
+<div class="mode-panel" id="mode-long">
+
+  <div class="intro long">
+    <h2>🌳 Long-Term Investing Check</h2>
+    <p>Hold 1-10+ years · Weekly chart · Bucket A · No stop loss · Buy big dips only</p>
+  </div>
+
+  <div class="checks">
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">1</div>
+        <div class="check-title">Mega-cap quality</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is this a true mega-cap with 20+ year history? (MSFT, GOOGL, JNJ, V, JPM, BRK-B level)</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Survived multiple recessions</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Newer/smaller company → Bucket B</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">2</div>
+        <div class="check-title">Real big dip</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is the stock down at least 15-20% from its all-time high? (a real correction, not a dip)</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Real correction, real opportunity</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Less than 15% — wait for bigger drop</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">3</div>
+        <div class="check-title">Business is healthy</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Are revenue, profit margin, and free cash flow still growing year-over-year?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Business is still firing</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Declining fundamentals = different beast</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">4</div>
+        <div class="check-title">No structural break</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is the drop from macro fear (Fed, recession, war) and NOT from fraud/lawsuit/disruption?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Temporary macro pressure</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Real structural problem = avoid</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">5</div>
+        <div class="check-title">Reasonable valuation</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Is the P/E ratio in line with or below its 5-year average for this company?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Fair or cheap valuation</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Still expensive vs history</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">6</div>
+        <div class="check-title">Position size OK</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Will this position be ≤ €500 (Bucket A max per stock) and bring total holdings to 5-7 stocks?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Sized right for diversification</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>Too concentrated or too thin</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">7</div>
+        <div class="check-title">10-year hold OK</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Are you OK holding this even if it drops another 30% before recovering?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Mentally prepared, won't panic-sell</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>If you'd panic — don't buy yet</div>
+      </div>
+    </div>
+
+    <div class="check" data-mode="long">
+      <div class="check-header">
+        <div class="check-num">8</div>
+        <div class="check-title">Buy in tranches</div>
+        <div class="check-icon">○</div>
+      </div>
+      <div class="check-question">Will you buy in 2-3 portions (not all at once) over 1-3 months?</div>
+      <div class="check-passfail">
+        <div class="check-pass"><strong>✓ PASS</strong>Average in, reduce timing risk</div>
+        <div class="check-fail"><strong>✗ FAIL</strong>All-in at once = max regret risk</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="score-card">
+    <div class="score-row">
+      <div class="score-label">Score</div>
+      <div class="score-display"><span id="score-long">0</span><span class="total">/8</span></div>
+    </div>
+    <div class="score-bar"><div class="score-fill" id="bar-long" style="width: 0%"></div></div>
+    <div class="verdict bad" id="verdict-long">Tap each check above to mark it ✓</div>
+  </div>
+
+  <button class="reset-btn" data-reset="long">↻ Reset checks</button>
+
+  <div class="rules" style="background: linear-gradient(135deg, #064e3b 0%, #065f46 100%); border-color: var(--green);">
+    <h3 style="color: #6ee7b7;">🌳 Long-Term Investing Golden Rules</h3>
+    <div class="rule-list">
+      <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">1</div>Only mega-caps with 20+ year history.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">2</div>Buy 15%+ corrections, ignore small dips.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">3</div>No stop loss — but verify business is healthy.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">4</div>Buy in 2-3 tranches over weeks/months.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">5</div>Reinvest dividends, ignore daily noise.</div>
+      <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">6</div>Check positions quarterly, not daily.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- SELL DECISIONS (TAKE PROFIT or CUT LOSS) -->
+<!-- ════════════════════════════════════════════════ -->
+<div class="mode-panel" id="mode-sell">
+
+  <div class="intro" style="border-color: #ec4899;">
+    <h2>💰 Sell Decision Check</h2>
+    <p>Use when you have an OPEN position and need to decide: take profit, hold, or cut loss?</p>
+  </div>
+
+  <!-- Sub-mode toggle: take profit vs cut loss -->
+  <div class="tabs" style="margin-bottom: 20px;">
+    <button class="sub-tab active" data-sub="profit" style="flex:1; padding:12px 8px; border-radius:10px; font-size:0.9rem; font-weight:600; cursor:pointer; border:none; font-family:inherit; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white;">
+      <span style="display:block; font-size:1.2rem; margin-bottom:2px;">📈</span>
+      <span>TRADE IS UP — take profit?</span>
+    </button>
+    <button class="sub-tab" data-sub="loss" style="flex:1; padding:12px 8px; border-radius:10px; font-size:0.9rem; font-weight:600; cursor:pointer; border:none; font-family:inherit; background: transparent; color: var(--text-dim);">
+      <span style="display:block; font-size:1.2rem; margin-bottom:2px;">📉</span>
+      <span>TRADE IS DOWN — cut loss?</span>
+    </button>
+  </div>
+
+  <!-- ────── TAKE PROFIT CHECKS ────── -->
+  <div class="sub-panel" id="sub-profit">
+
+    <div class="warning" style="background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.3);">
+      <h3 style="color: #10b981;">📈 The take-profit problem</h3>
+      <p style="color: #a7f3d0;">Most retail traders sell winners too early (anxiety) OR too late (greed). The right answer is to take profits IN PIECES — never all at once. The more checks below that pass, the more aggressive you should be in taking profit.</p>
+    </div>
+
+    <div class="checks">
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">1</div>
+          <div class="check-title">Hit profit target</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price reached your pre-planned profit target (the limit-sell price you set)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Order should auto-execute — take 50% off</div>
+          <div class="check-fail"><strong>✗ NO</strong>Hold for now, target not hit yet</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">2</div>
+          <div class="check-title">RSI 70+</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is the daily RSI now above 70 (overbought)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Overbought = pullback likely, take 50%</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still room to run</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">3</div>
+          <div class="check-title">At resistance</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price reached a previous high or major resistance level?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Sellers will likely appear, take profit</div>
+          <div class="check-fail"><strong>✗ NO</strong>No major resistance overhead</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">4</div>
+          <div class="check-title">Bearish reversal candle</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has today formed a shooting star, doji at top, or long red candle?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Buyers exhausted — take profit now</div>
+          <div class="check-fail"><strong>✗ NO</strong>Trend still healthy</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">5</div>
+          <div class="check-title">Bearish divergence</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is price making higher highs but RSI making lower highs?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Momentum weakening — tighten stop or exit</div>
+          <div class="check-fail"><strong>✗ NO</strong>Price and momentum agree</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">6</div>
+          <div class="check-title">Below 9 EMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price closed BELOW the 9 EMA (red line) for the first time during this trade?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Short-term momentum done, exit half</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still riding above short EMA</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">7</div>
+          <div class="check-title">Volume spike on red</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Did today's red candle have ABOVE-average volume? (heavy selling)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Big sellers offloading — exit immediately</div>
+          <div class="check-fail"><strong>✗ NO</strong>Low-volume pullback, less worrying</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="profit">
+        <div class="check-header">
+          <div class="check-num">8</div>
+          <div class="check-title">Earnings ≤7 days</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Are earnings coming up within 7 days?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>EXIT BEFORE EARNINGS — never hold through</div>
+          <div class="check-fail"><strong>✗ NO</strong>Earnings far away, OK to hold</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="score-card">
+      <div class="score-row">
+        <div class="score-label">Profit Signals</div>
+        <div class="score-display"><span id="score-profit">0</span><span class="total">/8</span></div>
+      </div>
+      <div class="score-bar"><div class="score-fill" id="bar-profit" style="width: 0%"></div></div>
+      <div class="verdict bad" id="verdict-profit">Tap each signal you see</div>
+    </div>
+
+    <button class="reset-btn" data-reset="profit">↻ Reset checks</button>
+
+    <div class="rules" style="background: linear-gradient(135deg, #064e3b 0%, #065f46 100%); border-color: var(--green);">
+      <h3 style="color: #6ee7b7;">📈 Take-Profit Action Guide</h3>
+      <div class="rule-list">
+        <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">1</div><strong>1-2 signals:</strong> Hold, move stop UP to break-even</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">2</div><strong>3-4 signals:</strong> Sell 50% NOW, trail rest under 21 EMA</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">3</div><strong>5+ signals:</strong> EXIT FULL POSITION immediately</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">4</div><strong>Earnings ≤7 days:</strong> EXIT regardless of other signals</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">5</div>Never let a winner turn into a loser — move stop up</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(16, 185, 129, 0.3);">6</div>Take profits in PIECES — 50% first, then trail rest</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ────── CUT LOSS CHECKS ────── -->
+  <div class="sub-panel" id="sub-loss" style="display:none;">
+
+    <div class="warning">
+      <h3>⚠ The cut-loss problem</h3>
+      <p>The single biggest account-killer is "holding losers hoping they recover." Stop losses exist for a reason. The more signals below that fire, the more urgent it is to exit. If your stop hasn't been triggered yet but multiple signals fire, exit MANUALLY — don't wait.</p>
+    </div>
+
+    <div class="checks">
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">1</div>
+          <div class="check-title">Hit stop loss</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price hit your pre-set stop loss price?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Order should auto-execute — DO NOT cancel it</div>
+          <div class="check-fail"><strong>✗ NO</strong>Stop not yet triggered, check other signals</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">2</div>
+          <div class="check-title">Below 50 EMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price broken BELOW the 50 EMA (yellow line)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Major trend broken — exit immediately</div>
+          <div class="check-fail"><strong>✗ NO</strong>Trend still intact</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">3</div>
+          <div class="check-title">Below 200 SMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price broken BELOW the 200 SMA (dashed line)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Long-term trend dead — EXIT no excuses</div>
+          <div class="check-fail"><strong>✗ NO</strong>Big-picture still OK</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">4</div>
+          <div class="check-title">Bad news appeared</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has the company had real bad news? (earnings miss, fraud probe, lawsuit, FDA reject)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Story changed — EXIT, your thesis broke</div>
+          <div class="check-fail"><strong>✗ NO</strong>Just price action, no story change</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">5</div>
+          <div class="check-title">2-3 weeks no progress</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has the trade gone nowhere for 2-3 weeks already?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Time stop hit — exit at break-even, recycle capital</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still within timing window</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">6</div>
+          <div class="check-title">High volume on drop</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Are recent red candles on ABOVE-average volume?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Big sellers — bad sign, lean toward exit</div>
+          <div class="check-fail"><strong>✗ NO</strong>Light selling, may stabilize</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">7</div>
+          <div class="check-title">Tempted to move stop down</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Are you THINKING about moving your stop loss DOWN to give the trade more room?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>RED FLAG — this is the #1 way retail loses. EXIT NOW</div>
+          <div class="check-fail"><strong>✗ NO</strong>Discipline intact, keep stop where it is</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="loss">
+        <div class="check-header">
+          <div class="check-num">8</div>
+          <div class="check-title">Adding to loser</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Are you considering "averaging down" by buying more shares at the lower price?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>STOP — averaging down on Bucket B trades = account killer. EXIT first</div>
+          <div class="check-fail"><strong>✗ NO</strong>Following the system, no averaging down</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="score-card">
+      <div class="score-row">
+        <div class="score-label">Cut-Loss Signals</div>
+        <div class="score-display"><span id="score-loss">0</span><span class="total">/8</span></div>
+      </div>
+      <div class="score-bar"><div class="score-fill" id="bar-loss" style="width: 0%"></div></div>
+      <div class="verdict bad" id="verdict-loss">Tap each signal you see</div>
+    </div>
+
+    <button class="reset-btn" data-reset="loss">↻ Reset checks</button>
+
+    <div class="rules" style="background: linear-gradient(135deg, #422006 0%, #7f1d1d 100%); border-color: var(--red);">
+      <h3 style="color: #fca5a5;">📉 Cut-Loss Action Guide</h3>
+      <div class="rule-list">
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">1</div><strong>0-1 signals:</strong> Hold, trust your stop loss</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">2</div><strong>2-3 signals:</strong> Tighten stop higher, prepare to exit</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">3</div><strong>4+ signals:</strong> EXIT MANUALLY now, don't wait for stop</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">4</div><strong>Signal 7 or 8 fires:</strong> EXIT immediately — psychology is breaking</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">5</div>NEVER move stops down. NEVER cancel a stop order.</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">6</div>A small loss is fine. A big loss = a stop you didn't honor.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- HUMBLED TRADER PATTERNS -->
+<!-- ════════════════════════════════════════════════ -->
+<div class="mode-panel" id="mode-ht">
+
+  <div class="intro" style="border-color: #a855f7;">
+    <h2>🎯 Humbled Trader's 3 Swing Patterns</h2>
+    <p>Daily chart · 8 EMA + 200 SMA + Volume · Stocks ≥ $1B market cap · Quality over quantity · 2-5 trades/month</p>
+  </div>
+
+  <!-- Sub-mode toggle: 3 patterns -->
+  <div class="tabs" style="margin-bottom: 20px;">
+    <button class="ht-tab active" data-ht="gap" style="flex:1; padding:10px 6px; border-radius:10px; font-size:0.82rem; font-weight:700; cursor:pointer; border:none; font-family:inherit; background: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%); color: white;">
+      <span style="display:block; font-size:1.2rem; margin-bottom:2px;">📊</span>
+      <span>GAP UP</span>
+    </button>
+    <button class="ht-tab" data-ht="downtrend" style="flex:1; padding:10px 6px; border-radius:10px; font-size:0.82rem; font-weight:700; cursor:pointer; border:none; font-family:inherit; background: transparent; color: var(--text-dim);">
+      <span style="display:block; font-size:1.2rem; margin-bottom:2px;">📉</span>
+      <span>DOWNTREND BREAK</span>
+    </button>
+    <button class="ht-tab" data-ht="oversold" style="flex:1; padding:10px 6px; border-radius:10px; font-size:0.82rem; font-weight:700; cursor:pointer; border:none; font-family:inherit; background: transparent; color: var(--text-dim);">
+      <span style="display:block; font-size:1.2rem; margin-bottom:2px;">🔽</span>
+      <span>OVERSOLD BOUNCE</span>
+    </button>
+  </div>
+
+  <!-- ────── PATTERN 1: GAP UP ────── -->
+  <div class="ht-panel" id="ht-gap">
+
+    <div class="warning" style="background: rgba(168, 85, 247, 0.1); border-color: rgba(168, 85, 247, 0.3);">
+      <h3 style="color: #c4b5fd;">📊 Pattern 1: Daily Gap Up over Multi-Month Resistance</h3>
+      <p style="color: #ddd6fe;">Stock gaps up overnight ABOVE a resistance level that held for 2+ months, ideally on real news (earnings beat, guidance raise). Then you wait for the pullback to the 8 EMA for entry. This is HT's favorite and most reliable pattern.</p>
+    </div>
+
+    <div class="checks">
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">1</div>
+          <div class="check-title">Market cap ≥ $1B</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is this a mid/large cap stock (NOT a penny stock or microcap)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>$1B+ market cap, $5+ per share</div>
+          <div class="check-fail"><strong>✗ NO</strong>Skip — pattern doesn't work on small caps</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">2</div>
+          <div class="check-title">Real overnight gap</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Did stock open clearly higher than yesterday's close? (visible gap on daily chart)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Clear gap, at least 3% from yesterday's close</div>
+          <div class="check-fail"><strong>✗ NO</strong>Just a regular up day, not a gap</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">3</div>
+          <div class="check-title">Above multi-month resistance</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Did the gap CLEAR a resistance level that held for 2+ months? (not just last month's high)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Breaking out of long-held resistance</div>
+          <div class="check-fail"><strong>✗ NO</strong>Just hitting recent resistance — wait</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">4</div>
+          <div class="check-title">Above 200 SMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is price clearly above the 200 SMA (purple line)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Long-term trend supports the breakout</div>
+          <div class="check-fail"><strong>✗ NO</strong>Below 200 SMA = skip this pattern</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">5</div>
+          <div class="check-title">Real news catalyst</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is there a real positive catalyst? (earnings beat, raised guidance, major contract, FDA approval)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Concrete fundamental driver</div>
+          <div class="check-fail"><strong>✗ NO</strong>Vague news/no catalyst = unreliable</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">6</div>
+          <div class="check-title">High volume on gap</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is gap-up day volume well ABOVE the recent average? (visible spike in volume bars)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Real institutional buying</div>
+          <div class="check-fail"><strong>✗ NO</strong>Light volume = fragile breakout</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">7</div>
+          <div class="check-title">Holding above gap mid-day</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">After 12pm Eastern, is the stock still holding most of the gap (not fading back to fill)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Strong, gap has buyers defending it</div>
+          <div class="check-fail"><strong>✗ NO</strong>Fading gap = trap, skip</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="gap">
+        <div class="check-header">
+          <div class="check-num">8</div>
+          <div class="check-title">Pullback to 8 EMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price pulled back to the 8 EMA (orange line)? Or is it riding along it?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Entry zone — buy here</div>
+          <div class="check-fail"><strong>✗ NO</strong>Price still extended — wait for pullback</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="score-card">
+      <div class="score-row">
+        <div class="score-label">Confirmations</div>
+        <div class="score-display"><span id="score-gap">0</span><span class="total">/8</span></div>
+      </div>
+      <div class="score-bar"><div class="score-fill" id="bar-gap" style="width: 0%"></div></div>
+      <div class="verdict bad" id="verdict-gap">Tap each check above</div>
+    </div>
+
+    <button class="reset-btn" data-reset="gap">↻ Reset checks</button>
+
+    <div class="rules" style="background: linear-gradient(135deg, #4c1d95 0%, #6b21a8 100%); border-color: #a855f7;">
+      <h3 style="color: #ddd6fe;">📊 Gap Up Pattern — Execution Rules</h3>
+      <div class="rule-list">
+        <div class="rule"><div class="rule-num" style="background: rgba(168, 85, 247, 0.3);">1</div><strong>Entry:</strong> Pullback to 8 EMA on the daily chart</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(168, 85, 247, 0.3);">2</div><strong>Stop:</strong> Below low of entry candle OR last swing low</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(168, 85, 247, 0.3);">3</div><strong>Target:</strong> Previous resistance OR exit on extension from 8 EMA</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(168, 85, 247, 0.3);">4</div><strong>Sell in quarters:</strong> 25% / 25% / 25% / 25% as price runs</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(168, 85, 247, 0.3);">5</div>Scan for these AFTER 12pm Eastern (mid-day, not pre-market)</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(168, 85, 247, 0.3);">6</div>Best opportunities cluster around earnings season</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ────── PATTERN 2: DOWNTREND BREAK ────── -->
+  <div class="ht-panel" id="ht-downtrend" style="display:none;">
+
+    <div class="warning" style="background: rgba(245, 158, 11, 0.1); border-color: rgba(245, 158, 11, 0.3);">
+      <h3 style="color: #fcd34d;">📉 Pattern 2: Long-Term Downtrend Break</h3>
+      <p style="color: #fde68a;">Stock has been in a sustained downtrend (sloping resistance line for months). Now breaks out ABOVE that downtrend AND reclaims the 200 SMA on heavy volume. Catches major reversals after long bear phases. Slower setup, bigger moves.</p>
+    </div>
+
+    <div class="checks">
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">1</div>
+          <div class="check-title">Market cap ≥ $1B</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Mid/large cap stock (no penny stocks)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Liquid mid/large cap</div>
+          <div class="check-fail"><strong>✗ NO</strong>Skip — not for small caps</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">2</div>
+          <div class="check-title">Clear long downtrend</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Can you draw a downward sloping line connecting 3+ lower highs over 2+ months?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Real, drawable downtrend exists</div>
+          <div class="check-fail"><strong>✗ NO</strong>No clear trend = no setup</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">3</div>
+          <div class="check-title">Broke above downtrend line</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price closed ABOVE that sloping resistance line?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Trend broken, change in character</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still inside the downtrend</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">4</div>
+          <div class="check-title">Reclaimed 200 SMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price closed back above the 200 SMA (purple line)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Long-term trend turning</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still below 200 SMA = wait</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">5</div>
+          <div class="check-title">Holding above 200 SMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has price stayed above 200 SMA for 2-3+ days (not just one candle)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Hold confirmed, not a one-day fakeout</div>
+          <div class="check-fail"><strong>✗ NO</strong>Wait for confirmation, fakeouts common</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">6</div>
+          <div class="check-title">Heavy volume on break</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is the breakout volume EXCEPTIONALLY high (visibly bigger than recent bars)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Real institutional participation</div>
+          <div class="check-fail"><strong>✗ NO</strong>Quiet breakout = often fails</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">7</div>
+          <div class="check-title">Catalyst (optional but good)</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is there a real reason for the reversal? (earnings beat, sector rotation, major news)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Story matches the chart</div>
+          <div class="check-fail"><strong>✗ NO</strong>Move on lower probability without catalyst</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="downtrend">
+        <div class="check-header">
+          <div class="check-num">8</div>
+          <div class="check-title">Risk-reward ≥ 2:1</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is target (previous daily resistance) at least 2× the distance to your stop (recent support below 200 SMA)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Math works — take it</div>
+          <div class="check-fail"><strong>✗ NO</strong>Bad R:R = skip</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="score-card">
+      <div class="score-row">
+        <div class="score-label">Confirmations</div>
+        <div class="score-display"><span id="score-downtrend">0</span><span class="total">/8</span></div>
+      </div>
+      <div class="score-bar"><div class="score-fill" id="bar-downtrend" style="width: 0%"></div></div>
+      <div class="verdict bad" id="verdict-downtrend">Tap each check above</div>
+    </div>
+
+    <button class="reset-btn" data-reset="downtrend">↻ Reset checks</button>
+
+    <div class="rules" style="background: linear-gradient(135deg, #422006 0%, #92400e 100%); border-color: #f59e0b;">
+      <h3 style="color: #fde68a;">📉 Downtrend Break — Execution Rules</h3>
+      <div class="rule-list">
+        <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">1</div><strong>Entry:</strong> Just above 200 SMA after 2-3 days holding</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">2</div><strong>Stop:</strong> Below recent support (NOT right below 200 SMA — too tight)</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">3</div><strong>Target:</strong> Previous daily resistance levels (multiple)</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">4</div><strong>Sell in quarters:</strong> at each previous resistance level</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">5</div>Slower setup — give the trade weeks to play out</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(245, 158, 11, 0.3);">6</div>Best after earnings beats that change the company narrative</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ────── PATTERN 3: OVERSOLD BOUNCE ────── -->
+  <div class="ht-panel" id="ht-oversold" style="display:none;">
+
+    <div class="warning">
+      <h3>🔽 Pattern 3: Oversold Bounce (the hardest one)</h3>
+      <p>Stock dropped sharply (often on earnings), now far below 200 SMA, has been getting hammered for weeks. ONLY trade when (1) the news is recoverable, NOT permanent damage, AND (2) stock has FORMED A BOTTOM and reclaimed 8 EMA. Don't try to catch the falling knife.</p>
+    </div>
+
+    <div class="checks">
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">1</div>
+          <div class="check-title">Market cap ≥ $1B</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Mid/large cap with established business?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Liquid, recoverable company</div>
+          <div class="check-fail"><strong>✗ NO</strong>Skip — small caps too risky for this</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">2</div>
+          <div class="check-title">Big drop happened</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Did the stock drop 15%+ on a single news event in the past few weeks?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Real selloff has occurred</div>
+          <div class="check-fail"><strong>✗ NO</strong>Slow grind down ≠ this pattern</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">3</div>
+          <div class="check-title">Catalyst is RECOVERABLE</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is the news a temporary problem (single bad quarter, macro fear, sector rotation) NOT a permanent issue (fraud, broken business model, accounting probe)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Company can recover from this</div>
+          <div class="check-fail"><strong>✗✗ NO</strong>HARD SKIP — fraud/structural issues don't bounce</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">4</div>
+          <div class="check-title">Selling has stopped</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Has the stock stopped making new lows for at least 3-5 days? (basing pattern forming)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Bottom forming</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still falling = wait, don't catch knife</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">5</div>
+          <div class="check-title">Broke short-term downtrend</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">On daily chart, has price broken its short-term downtrend line (the slope of the recent decline)?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Selling pressure released</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still in downtrend — too early</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">6</div>
+          <div class="check-title">Reclaimed 8 EMA</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Did today's candle close ABOVE the 8 EMA (orange line) for the first time during the selloff?</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Momentum shifting — entry signal</div>
+          <div class="check-fail"><strong>✗ NO</strong>Still below 8 EMA = no entry yet</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">7</div>
+          <div class="check-title">Volume on bounce</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Is the bounce candle volume above recent average? (real buyers stepping in)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Real reversal volume</div>
+          <div class="check-fail"><strong>✗ NO</strong>Light volume bounces fail 70%+ of the time</div>
+        </div>
+      </div>
+
+      <div class="check" data-mode="oversold">
+        <div class="check-header">
+          <div class="check-num">8</div>
+          <div class="check-title">Tight stop possible</div>
+          <div class="check-icon">○</div>
+        </div>
+        <div class="check-question">Can you set stop at the LOW of the entry candle? (clear, tight invalidation)</div>
+        <div class="check-passfail">
+          <div class="check-pass"><strong>✓ YES</strong>Defined risk, target = 200 SMA</div>
+          <div class="check-fail"><strong>✗ NO</strong>No clear stop = no trade</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="score-card">
+      <div class="score-row">
+        <div class="score-label">Confirmations</div>
+        <div class="score-display"><span id="score-oversold">0</span><span class="total">/8</span></div>
+      </div>
+      <div class="score-bar"><div class="score-fill" id="bar-oversold" style="width: 0%"></div></div>
+      <div class="verdict bad" id="verdict-oversold">Tap each check above</div>
+    </div>
+
+    <button class="reset-btn" data-reset="oversold">↻ Reset checks</button>
+
+    <div class="rules" style="background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%); border-color: #ef4444;">
+      <h3 style="color: #fecaca;">🔽 Oversold Bounce — Execution Rules</h3>
+      <div class="rule-list">
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">1</div><strong>Entry:</strong> Close above 8 EMA after downtrend break</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">2</div><strong>Stop:</strong> Low of entry candle (tight, clear)</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">3</div><strong>Target:</strong> 200 SMA (often 10-20% upside)</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">4</div><strong>HARD STOP if catalyst is permanent:</strong> fraud, accounting, FDA reject = NEVER trade</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">5</div>Hardest pattern to time — accept lower win rate</div>
+        <div class="rule"><div class="rule-num" style="background: rgba(239, 68, 68, 0.3);">6</div>Smaller position size than other patterns</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <p>⚠️ <strong>Not financial advice.</strong> Personal trading reference.</p>
+  <p style="margin-top: 6px;">Always use stop losses where applicable · Risk only what you can afford to lose</p>
+</footer>
+
+</div>
+
+<script>
+  // Tab switching
+  const tabs = document.querySelectorAll('.tab');
+  const panels = document.querySelectorAll('.mode-panel');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const mode = tab.dataset.mode;
+      tabs.forEach(t => t.classList.remove('active'));
+      panels.forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('mode-' + mode).classList.add('active');
+    });
+  });
+
+  // Check toggle + score update
+  function updateScore(mode) {
+    // Sub-modes live in different panels:
+    //   profit/loss → "sub-profit" / "sub-loss" (inside SELL tab)
+    //   gap/downtrend/oversold → "ht-gap" / "ht-downtrend" / "ht-oversold" (inside HT tab)
+    //   main modes (swing/day/long) → "mode-swing" / "mode-day" / "mode-long"
+    const subSell = ['profit', 'loss'];
+    const subHT = ['gap', 'downtrend', 'oversold'];
+    let panelId;
+    if (subSell.includes(mode))      panelId = 'sub-' + mode;
+    else if (subHT.includes(mode))   panelId = 'ht-' + mode;
+    else                             panelId = 'mode-' + mode;
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    const checks = panel.querySelectorAll('.check');
+    const total = checks.length;
+    const done = panel.querySelectorAll('.check.checked').length;
+    const pct = total > 0 ? (done / total) * 100 : 0;
+
+    const scoreEl = document.getElementById('score-' + mode);
+    const barEl = document.getElementById('bar-' + mode);
+    const verdictEl = document.getElementById('verdict-' + mode);
+
+    scoreEl.textContent = done;
+    barEl.style.width = pct + '%';
+
+    // Color the bar
+    if (pct >= 75) {
+      barEl.style.background = 'var(--green)';
+    } else if (pct >= 50) {
+      barEl.style.background = 'var(--amber)';
+    } else {
+      barEl.style.background = 'var(--red)';
+    }
+
+    // Update verdict — context-aware for buy vs sell modes
+    verdictEl.classList.remove('bad', 'mid', 'good');
+
+    if (mode === 'profit') {
+      // TAKE PROFIT: more signals firing = MORE urgent to take profit (good thing)
+      // bar color stays green-orange-red mapped from low-to-high (more signals = more urgent)
+      if (done === 0) {
+        verdictEl.textContent = 'No profit signals yet — let the trade run';
+        verdictEl.classList.add('good');
+        barEl.style.background = 'var(--green)';
+      } else if (done <= 2) {
+        verdictEl.textContent = '✓ Hold · Move stop UP to break-even';
+        verdictEl.classList.add('good');
+        barEl.style.background = 'var(--green)';
+      } else if (done <= 4) {
+        verdictEl.textContent = '⚠ Take 50% profit · Trail rest under 21 EMA';
+        verdictEl.classList.add('mid');
+        barEl.style.background = 'var(--amber)';
+      } else {
+        verdictEl.textContent = '✗ EXIT FULL POSITION immediately';
+        verdictEl.classList.add('bad');
+        barEl.style.background = 'var(--red)';
+      }
+    } else if (mode === 'loss') {
+      // CUT LOSS: more signals firing = MORE urgent to exit (bad thing)
+      if (done === 0) {
+        verdictEl.textContent = 'Hold · Trust your stop loss order';
+        verdictEl.classList.add('good');
+        barEl.style.background = 'var(--green)';
+      } else if (done <= 1) {
+        verdictEl.textContent = '✓ Hold · Stop loss should handle this';
+        verdictEl.classList.add('good');
+        barEl.style.background = 'var(--green)';
+      } else if (done <= 3) {
+        verdictEl.textContent = '⚠ Tighten stop higher · Prepare to exit';
+        verdictEl.classList.add('mid');
+        barEl.style.background = 'var(--amber)';
+      } else {
+        verdictEl.textContent = '✗ EXIT MANUALLY NOW · Don\'t wait for stop';
+        verdictEl.classList.add('bad');
+        barEl.style.background = 'var(--red)';
+      }
+    } else {
+      // BUY modes (swing, day, long): more checks = better setup
+      if (done === 0) {
+        verdictEl.textContent = 'Tap each check above to mark it ✓';
+        verdictEl.classList.add('bad');
+      } else if (done <= total * 0.4) {
+        verdictEl.textContent = '✗ Not a real setup — walk away';
+        verdictEl.classList.add('bad');
+      } else if (done <= total * 0.6) {
+        verdictEl.textContent = '⚠ Marginal setup — wait or skip';
+        verdictEl.classList.add('mid');
+      } else if (done <= total * 0.85) {
+        verdictEl.textContent = '★★ Strong setup — take it (standard size)';
+        verdictEl.classList.add('good');
+      } else {
+        verdictEl.textContent = '★★★ Premium setup — full conviction trade';
+        verdictEl.classList.add('good');
+      }
+    }
+  }
+
+  document.querySelectorAll('.check').forEach(check => {
+    check.addEventListener('click', () => {
+      check.classList.toggle('checked');
+      const icon = check.querySelector('.check-icon');
+      icon.textContent = check.classList.contains('checked') ? '✓' : '○';
+      updateScore(check.dataset.mode);
+    });
+  });
+
+  // Reset buttons
+  document.querySelectorAll('.reset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.reset;
+      const subSell = ['profit', 'loss'];
+      const subHT = ['gap', 'downtrend', 'oversold'];
+      let panelId;
+      if (subSell.includes(mode))      panelId = 'sub-' + mode;
+      else if (subHT.includes(mode))   panelId = 'ht-' + mode;
+      else                             panelId = 'mode-' + mode;
+      const panel = document.getElementById(panelId);
+      if (!panel) return;
+      panel.querySelectorAll('.check').forEach(c => {
+        c.classList.remove('checked');
+        c.querySelector('.check-icon').textContent = '○';
+      });
+      updateScore(mode);
+    });
+  });
+
+  // Init scores
+  ['swing', 'day', 'long', 'profit', 'loss', 'gap', 'downtrend', 'oversold'].forEach(updateScore);
+
+  // Ticker clear button - resets ticker fields AND all checks
+  document.getElementById('ticker-clear').addEventListener('click', () => {
+    if (!confirm('Clear ticker info AND all checks across all tabs?')) return;
+    document.getElementById('ticker-input').value = '';
+    document.getElementById('ticker-price').value = '';
+    document.getElementById('ticker-notes').value = '';
+    document.querySelectorAll('.check').forEach(c => {
+      c.classList.remove('checked');
+      c.querySelector('.check-icon').textContent = '○';
+    });
+    ['swing', 'day', 'long', 'profit', 'loss', 'gap', 'downtrend', 'oversold'].forEach(updateScore);
+  });
+
+  // Auto-uppercase the ticker
+  document.getElementById('ticker-input').addEventListener('input', e => {
+    e.target.value = e.target.value.toUpperCase();
+  });
+
+  // Sub-tab switching (within SELL mode)
+  document.querySelectorAll('.sub-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sub = btn.dataset.sub;
+      document.querySelectorAll('.sub-tab').forEach(b => {
+        b.style.background = 'transparent';
+        b.style.color = 'var(--text-dim)';
+        b.classList.remove('active');
+      });
+      btn.classList.add('active');
+      if (sub === 'profit') {
+        btn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+      } else {
+        btn.style.background = 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)';
+      }
+      btn.style.color = 'white';
+      document.querySelectorAll('.sub-panel').forEach(p => p.style.display = 'none');
+      document.getElementById('sub-' + sub).style.display = 'block';
+    });
+  });
+
+  // HT pattern sub-tab switching (within HT PATTERNS mode)
+  document.querySelectorAll('.ht-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ht = btn.dataset.ht;
+      document.querySelectorAll('.ht-tab').forEach(b => {
+        b.style.background = 'transparent';
+        b.style.color = 'var(--text-dim)';
+        b.classList.remove('active');
+      });
+      btn.classList.add('active');
+      // Color per pattern
+      const colors = {
+        gap: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+        downtrend: 'linear-gradient(135deg, #f59e0b 0%, #b45309 100%)',
+        oversold: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)'
+      };
+      btn.style.background = colors[ht];
+      btn.style.color = 'white';
+      document.querySelectorAll('.ht-panel').forEach(p => p.style.display = 'none');
+      document.getElementById('ht-' + ht).style.display = 'block';
+    });
+  });
+</script>
+
+</body>
+</html>
