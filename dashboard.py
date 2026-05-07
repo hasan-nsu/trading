@@ -165,20 +165,153 @@ def upcoming_catalysts(days_ahead: int = 30) -> list[dict]:
 # AI BRAIN - REWRITTEN FOR PER-HEADLINE ANALYSIS
 # ============================================================================
 
+def _load_groq_keys() -> list[str]:
+    """
+    Load all Groq API keys in priority order.
+    Reads from Streamlit secrets first, then environment variables.
+
+    Conventions supported:
+      - GROQ_API_KEY        (primary)
+      - GROQ_API_KEY_2      (first backup)
+      - GROQ_API_KEY_3      (second backup)
+      - GROQ_API_KEY_4, _5  (further backups, up to 5 total)
+
+    Backups can be from a different Groq account, OR an OpenRouter/Cerebras
+    key as long as the SDK call format matches (Groq SDK is OpenAI-compatible).
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def _try_add(name: str) -> None:
+        val = None
+        try:
+            val = st.secrets.get(name)
+        except Exception:
+            pass
+        if not val:
+            val = os.environ.get(name)
+        if val and val.strip() and val.strip() not in seen:
+            seen.add(val.strip())
+            keys.append(val.strip())
+
+    _try_add("GROQ_API_KEY")
+    for i in range(2, 6):
+        _try_add(f"GROQ_API_KEY_{i}")
+    return keys
+
+
+class GroqKeyPool:
+    """
+    Failover pool for multiple Groq keys.
+    On rate-limit / auth errors, the failing key is parked for a cooldown period
+    and subsequent calls move to the next key.
+
+    Cooldowns:
+      - rate_limit_exceeded (per-minute):  60 seconds
+      - rate_limit_exceeded (per-day):     6 hours
+      - authentication errors:             until restart (key is bad)
+    """
+    def __init__(self) -> None:
+        self.keys = _load_groq_keys()
+        self._cooldown_until: dict[str, float] = {}
+        self._lock = __import__("threading").Lock()
+        # Cache a Groq client per key — avoids re-creating SDK objects every call
+        self._clients: dict[str, Groq] = {}
+
+    def has_any_key(self) -> bool:
+        return len(self.keys) > 0
+
+    def total_keys(self) -> int:
+        return len(self.keys)
+
+    def available_count(self) -> int:
+        import time
+        now = time.time()
+        with self._lock:
+            return sum(1 for k in self.keys if self._cooldown_until.get(k, 0) <= now)
+
+    def _client_for(self, key: str) -> Optional[Groq]:
+        if key not in self._clients:
+            try:
+                self._clients[key] = Groq(api_key=key)
+            except Exception:
+                return None
+        return self._clients[key]
+
+    def _cool_down(self, key: str, seconds: float) -> None:
+        import time
+        with self._lock:
+            self._cooldown_until[key] = time.time() + seconds
+
+    def chat_completion(self, **kwargs):
+        """
+        Call client.chat.completions.create with automatic failover across keys.
+        Raises the last exception if every key fails.
+        Returns None if no keys are configured.
+        """
+        import time
+        if not self.keys:
+            return None
+
+        last_exc: Optional[Exception] = None
+        now = time.time()
+
+        # Try each key in order, skipping any that are still cooling down
+        for key in self.keys:
+            if self._cooldown_until.get(key, 0) > now:
+                continue
+            client = self._client_for(key)
+            if client is None:
+                continue
+            try:
+                return client.chat.completions.create(**kwargs)
+            except Exception as e:
+                last_exc = e
+                msg = str(e).lower()
+                # Categorize the error and pick a cooldown window
+                if "rate_limit" in msg or "429" in msg or "too many requests" in msg:
+                    # Per-day quota errors mention "tokens per day" or "requests per day"
+                    if "per day" in msg or "tpd" in msg or "rpd" in msg:
+                        self._cool_down(key, 6 * 3600)  # 6 hours
+                    else:
+                        self._cool_down(key, 60)  # 1 minute
+                    continue
+                elif "auth" in msg or "401" in msg or "invalid api" in msg:
+                    self._cool_down(key, 86400)  # disable for ~a day
+                    continue
+                else:
+                    # Network / server / unknown errors: short cooldown, try next
+                    self._cool_down(key, 30)
+                    continue
+
+        # All keys exhausted
+        if last_exc:
+            raise last_exc
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def get_groq_pool() -> GroqKeyPool:
+    """Singleton key pool — survives Streamlit reruns within the same process."""
+    return GroqKeyPool()
+
+
 def get_groq_client() -> Optional[Groq]:
-    api_key = None
-    try:
-        api_key = st.secrets.get("GROQ_API_KEY")
-    except Exception:
-        pass
-    if not api_key:
-        api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
+    """
+    Backwards-compat shim. Returns a working client if any key is available,
+    None otherwise. New code should use get_groq_pool().chat_completion(...).
+    """
+    pool = get_groq_pool()
+    if not pool.has_any_key():
         return None
-    try:
-        return Groq(api_key=api_key)
-    except Exception:
-        return None
+    # Return the first non-cooled-down client for direct-use callers
+    import time
+    now = time.time()
+    for key in pool.keys:
+        if pool._cooldown_until.get(key, 0) <= now:
+            return pool._client_for(key)
+    # All keys cooled down — return the first client anyway so callers can still try
+    return pool._client_for(pool.keys[0]) if pool.keys else None
 
 
 def _extract_json(text: str) -> Optional[dict]:
@@ -214,8 +347,8 @@ def ai_analyze_stock(ticker: str, headlines: list[str]) -> dict:
       headline_analysis (list of {headline, impact, why}),
       source, error
     """
-    client = get_groq_client()
-    if not client or not headlines:
+    pool = get_groq_pool()
+    if not pool.has_any_key() or not headlines:
         return _fallback_sentiment(headlines)
 
     company = WATCHLIST.get(ticker, {}).get("name", ticker)
@@ -281,7 +414,7 @@ If most headlines are speculation, listicles, or noise → overall_sentiment is 
 Be honest. Be skeptical. Default to NEUTRAL."""
 
     try:
-        response = client.chat.completions.create(
+        response = pool.chat_completion(
             model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are a precise financial analyst. You output ONLY valid JSON."},
@@ -291,6 +424,8 @@ Be honest. Be skeptical. Default to NEUTRAL."""
             temperature=0.2,
             response_format={"type": "json_object"},
         )
+        if response is None:
+            return _fallback_sentiment(headlines, error="all keys cooled down")
         text = response.choices[0].message.content
         parsed = _extract_json(text)
         if not parsed:
@@ -378,8 +513,8 @@ def _fallback_sentiment(headlines: list[str], error: str = "") -> dict:
 @st.cache_data(ttl=900, show_spinner=False)  # 15 min cache
 def ai_macro_brief(macro_news: list[str], watchlist_tickers: list[str]) -> dict:
     """Macro brief + identifies which watchlist stocks are affected."""
-    client = get_groq_client()
-    if not client or not macro_news:
+    pool = get_groq_pool()
+    if not pool.has_any_key() or not macro_news:
         return {"brief": "", "winners": [], "losers": [], "source": "none"}
 
     news_text = "\n".join(f"- {n}" for n in macro_news[:10])
@@ -404,7 +539,7 @@ Respond ONLY with valid JSON:
 Only include tickers from the watchlist. Be specific. If macro news has no clear stock impact, leave winners/losers empty."""
 
     try:
-        response = client.chat.completions.create(
+        response = pool.chat_completion(
             model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": "You output only valid JSON."},
@@ -414,6 +549,8 @@ Only include tickers from the watchlist. Be specific. If macro news has no clear
             temperature=0.2,
             response_format={"type": "json_object"},
         )
+        if response is None:
+            return {"brief": "", "winners": [], "losers": [], "source": "all_keys_cooled_down"}
         parsed = _extract_json(response.choices[0].message.content)
         if not parsed:
             return {"brief": "", "winners": [], "losers": [], "source": "parse_failed"}
@@ -1383,12 +1520,20 @@ with col_b:
 with col_c:
     open_positions = st.text_input("📌 Open positions", "", placeholder="e.g. NVDA, F").upper()
 with col_d:
-    ai_on = bool(get_groq_client())
+    pool = get_groq_pool()
+    n_keys = pool.total_keys()
+    n_avail = pool.available_count() if n_keys else 0
     mx_on = bool(get_marketaux_key())
     ext_on = TRAFILATURA_AVAILABLE
-    ai_icon = "✅" if ai_on else "⚠️"
-    ai_label = "Groq" if ai_on else "OFF"
-    parts = [f"{ai_icon} AI: {ai_label}"]
+    if n_keys == 0:
+        ai_icon, ai_label = "⚠️", "AI: OFF"
+    elif n_avail == 0:
+        ai_icon, ai_label = "🟡", f"AI: {n_keys} keys (all cooled)"
+    elif n_keys == 1:
+        ai_icon, ai_label = "✅", "AI: 1 key"
+    else:
+        ai_icon, ai_label = "✅", f"AI: {n_avail}/{n_keys} keys ready"
+    parts = [f"{ai_icon} {ai_label}"]
     if mx_on:
         parts.append("📰 Marketaux")
     if ext_on:
@@ -2346,8 +2491,8 @@ user_q = st.text_input(
 )
 
 if user_q:
-    client = get_groq_client()
-    if not client:
+    pool = get_groq_pool()
+    if not pool.has_any_key():
         st.warning("AI is not configured. Set GROQ_API_KEY in Streamlit secrets.")
     else:
         context_lines = ["Today's watchlist analysis:"]
@@ -2370,13 +2515,17 @@ User question: {user_q}
 Answer in 4 sentences max. Be direct, honest, specific. Reference the watchlist data above. End with one concrete suggestion if relevant. No generic financial advice fluff."""
         try:
             with st.spinner("Thinking..."):
-                response = client.chat.completions.create(
+                response = pool.chat_completion(
                     model="llama-3.3-70b-versatile",
                     messages=[{"role": "user", "content": full_prompt}],
                     max_tokens=300,
                     temperature=0.4,
                 )
-                st.markdown(f"**AI:** {response.choices[0].message.content.strip()}")
+                if response is None:
+                    st.error("All AI keys are rate-limited right now. Try again in a minute.")
+                else:
+                    answer = response.choices[0].message.content.strip()
+                    st.markdown(f"**AI:** {html.escape(answer)}")
         except Exception as e:
             st.error(f"AI error: {e}")
 
